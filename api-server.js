@@ -3,9 +3,28 @@ require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const MoodleActivityTracker = require('./moodle-tracker');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ✅ CORRECT: Initialize app FIRST, then use CORS
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:3001', 
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'https://your-production-domain.com', // Add your production domain
+    process.env.FRONTEND_URL // Optional: from environment variable
+  ].filter(Boolean), // Remove any undefined values
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  credentials: true // If you need cookies/auth
+}));
+
+// Add express.json() middleware
+app.use(express.json());
 
 // Initialize Supabase
 const supabase = createClient(
