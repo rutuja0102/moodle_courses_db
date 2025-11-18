@@ -14,13 +14,10 @@ app.use(cors({
     'http://localhost:3000',
     'http://localhost:3001', 
     'http://localhost:5173',
-    'http://localhost:5174',
-    'https://your-production-domain.com', // Add your production domain
-    process.env.FRONTEND_URL // Optional: from environment variable
+    'http://localhost:5174' // Optional: from environment variable
   ].filter(Boolean), // Remove any undefined values
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  credentials: true // If you need cookies/auth
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
 // Add express.json() middleware
