@@ -4,7 +4,7 @@
   "description": "Complete Moodle course data extractor",
   "main": "complete-course-dashboard.js",
   "scripts": {
-    "start": "node complete-course-dashboard.js",
+    "start": "node api-server.js",
     "export": "node complete-course-dashboard.js"
   },
   "dependencies": {
