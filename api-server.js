@@ -1,4 +1,3 @@
-// api-server.js
 require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -8,804 +7,699 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ✅ CORRECT: Initialize app FIRST, then use CORS
+// ============================================================================
+// MIDDLEWARE & SUPABASE SETUP (KEEP EXISTING)
+// ============================================================================
+
+// ✅ CORS Configuration
 app.use(cors({
   origin: [
     'http://localhost:3000',
     'http://localhost:3001', 
     'http://localhost:5173',
-    'http://localhost:5174' // Optional: from environment variable
-  ].filter(Boolean), // Remove any undefined values
+    'http://localhost:5174'
+  ].filter(Boolean),
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
-// Add express.json() middleware
 app.use(express.json());
 
 // Initialize Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
+  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
 );
 
-// API Routes
+// Add logging middleware from server.js
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
 
-// 1. Main API - Upload complete course data (no body required)
-app.post('/api/courses/:courseId/upload', async (req, res) => {
+// ============================================================================
+// ENDPOINT 1: GET ALL COURSES WITH ENROLLMENT COUNT
+// Per Course: How Many Students Are Enrolled
+// ============================================================================
+
+app.get('/api/courses', async (req, res) => {
+  try {
+    const { visible, search } = req.query;
+
+    // Use the view for efficient querying
+    let query = supabase
+      .from('course_enrollment_summary')
+      .select('*');
+
+    if (visible !== undefined) {
+      query = query.eq('visible', visible === 'true');
+    }
+
+    if (search) {
+      query = query.or(`full_name.ilike.%${search}%,short_name.ilike.%${search}%`);
+    }
+
+    const { data, error } = await query.order('full_name');
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      courses: data
+    });
+
+  } catch (error) {
+    console.error('Error fetching courses:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// ENDPOINT 2: GET COURSE DETAILS WITH COMPLETION STATS
+// ============================================================================
+
+app.get('/api/courses/:courseId', async (req, res) => {
   try {
     const { courseId } = req.params;
-    const courseIdNum = parseInt(courseId);
-    
-    console.log(`🚀 Starting data upload for course ${courseIdNum}...`);
-    
-    // Initialize Moodle tracker
-    const moodleTracker = new MoodleActivityTracker(
-      process.env.MOODLE_URL,
-      process.env.MOODLE_TOKEN
-    );
 
-    // Step 1: Get enrolled students
-    console.log('📋 Step 1: Fetching students...');
-    const students = await moodleTracker.getEnrolledUsers(courseIdNum);
-    const studentsData = students.map(student => ({
-      id: parseInt(student.id),
-      username: student.username,
-      firstname: student.firstname,
-      lastname: student.lastname,
-      fullname: `${student.firstname} ${student.lastname}`,
-      email: student.email || "",
-      firstaccess: formatTimestamp(student.firstaccess),
-      lastaccess: formatTimestamp(student.lastaccess),
-      lastcourseaccess: formatTimestamp(student.lastcourseaccess),
-      roles: student.roles ? student.roles.map((r) => r.shortname).join(", ") : "student",
-      enrolledcourses: student.enrolledcourses ? student.enrolledcourses.length : 0,
-    }));
+    // Get course basic info
+    const { data: courseData, error: courseError } = await supabase
+      .from('courses')
+      .select('*')
+      .eq('course_id', parseInt(courseId))
+      .single();
 
-    // Save students
-    const { error: studentsError } = await supabase
-      .from('students')
-      .upsert(studentsData, { onConflict: 'id' });
-    if (studentsError) throw studentsError;
-    console.log(`✅ Saved ${studentsData.length} students`);
+    if (courseError) throw courseError;
 
-    // Step 2: Get course content
-    console.log('📋 Step 2: Fetching course content...');
-    const contents = await moodleTracker.getCourseContents(courseIdNum);
-    const flatContent = [];
-    
-    contents.forEach((section) => {
-      section.modules.forEach((module) => {
-        const item = {};
-        item.sectionnumber = section.section;
-        item.sectionname = section.name;
-        item.sectionvisible = section.visible === 1;
-        item.activityid = parseInt(module.id);
-        item.activityname = module.name;
-        item.activitytype = module.modname;
-        item.modplural = module.modplural;
-        item.indent = module.indent;
-        item.url = module.url || "";
-        item.visible = module.visible === 1;
-        item.visibleoncoursepage = module.visibleoncoursepage === 1;
-        item.uservisible = module.uservisible !== false;
-        item.availabilityinfo = module.availabilityinfo || "";
-        item.published = module.visible === 1 && module.visibleoncoursepage === 1;
-        item.hascompletion = (module.completion || 0) > 0;
-        item.completionexpected = module.completionexpected || 0;
-        item.completionexpecteddate = formatTimestamp(module.completionexpected);
-        item.addeddate = formatTimestamp(module.added);
-        item.description = module.description || "";
-        
-        flatContent.push(item);
+    if (!courseData) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Course not found' 
       });
-    });
-
-    // Save course content
-    const { error: contentError } = await supabase
-      .from('course_content')
-      .upsert(flatContent, { onConflict: 'activityid' });
-    if (contentError) throw contentError;
-    console.log(`✅ Saved ${flatContent.length} course content items`);
-
-    // Step 3: Get completion data for all students
-    console.log('📋 Step 3: Fetching completion data...');
-    const completionsData = [];
-    
-    for (let i = 0; i < students.length; i++) {
-      const student = students[i];
-      process.stdout.write(`  Processing student ${i + 1}/${students.length}\r`);
-
-      try {
-        const studentCompletions = await moodleTracker.getActivitiesCompletion(
-          courseIdNum,
-          student.id
-        );
-
-        // Create completion map
-        const completionMap = {};
-        for (const comp of studentCompletions.statuses || []) {
-          completionMap[comp.cmid] = comp;
-        }
-
-        // Match completions with activities
-        contents.forEach((section) => {
-          section.modules.forEach((module) => {
-            const completion = completionMap[module.id] || {};
-            
-            completionsData.push({
-              studentid: parseInt(student.id),
-              studentname: `${student.firstname} ${student.lastname}`,
-              studentemail: student.email || "",
-              sectionnumber: section.section,
-              sectionname: section.name,
-              activityid: parseInt(module.id),
-              activityname: module.name,
-              activitytype: module.modname,
-              published: module.visible === 1 && module.visibleoncoursepage === 1,
-              visible: module.visible === 1,
-              hascompletiontracking: (module.completion || 0) > 0,
-              completionstate: completion.state || 0,
-              completionstatus: getCompletionStatus(completion.state),
-              iscompleted: (completion.state || 0) >= 1,
-              ispassed: (completion.state || 0) === 2,
-              isfailed: (completion.state || 0) === 3,
-              completiondate: formatTimestamp(completion.timecompleted),
-              trackingtype: getTrackingType(completion.tracking),
-              overriddenby: completion.overrideby,
-            });
-          });
-        });
-      } catch (error) {
-        console.log(`\n⚠️  Warning: Could not get completions for ${student.fullname}`);
-      }
     }
-    console.log(''); // New line after progress
 
-    // Save completions in batches
-    console.log(`📋 Saving ${completionsData.length} completion records...`);
-    const batchSize = 100;
-    for (let i = 0; i < completionsData.length; i += batchSize) {
-      const batch = completionsData.slice(i, i + batchSize);
-      const { error: completionError } = await supabase
-        .from('completions')
-        .upsert(batch, { onConflict: 'studentid,activityid' });
-      if (completionError) throw completionError;
-    }
-    console.log(`✅ Saved ${completionsData.length} completion records`);
+    // Get enrollment count
+    const { count: enrollmentCount, error: enrollError } = await supabase
+      .from('enrollments')
+      .select('*', { count: 'exact', head: true })
+      .eq('course_id', parseInt(courseId))
+      .eq('status', 'active');
 
-    // Step 4: Calculate and save statistics
-    console.log('📋 Step 4: Calculating statistics...');
-    
-    // Calculate student statistics
-    const studentStats = students.map(student => {
-      const studentCompletions = completionsData.filter(
-        c => c.studentid === parseInt(student.id) && c.hascompletiontracking
-      );
-      
-      const completed = studentCompletions.filter(c => c.iscompleted).length;
-      const passed = studentCompletions.filter(c => c.ispassed).length;
-      const trackedActivities = flatContent.filter(a => a.hascompletion).length;
+    if (enrollError) throw enrollError;
 
-      return {
-        studentid: parseInt(student.id),
-        studentname: `${student.firstname} ${student.lastname}`,
-        studentemail: student.email || "",
-        firstaccess: formatTimestamp(student.firstaccess),
-        lastaccess: formatTimestamp(student.lastaccess),
-        lastcourseaccess: formatTimestamp(student.lastcourseaccess),
-        roles: student.roles ? student.roles.map((r) => r.shortname).join(", ") : "student",
-        totalactivities: trackedActivities,
-        activitiescompleted: completed,
-        activitiespassed: passed,
-        activitiesfailed: studentCompletions.filter(c => c.isfailed).length,
-        activitiesremaining: trackedActivities - completed,
-        completionpercentage: trackedActivities > 0 ? ((completed / trackedActivities) * 100).toFixed(2) : 0,
-        passpercentage: completed > 0 ? ((passed / completed) * 100).toFixed(2) : 0,
-        isactive: isStudentActive(student),
-        performancelevel: getPerformanceLevel(completed / trackedActivities)
-      };
-    });
+    // Get activities count
+    const { count: activitiesCount, error: activitiesError } = await supabase
+      .from('activities')
+      .select('*', { count: 'exact', head: true })
+      .eq('course_id', parseInt(courseId));
 
-    // Save student statistics
-    const { error: studentStatsError } = await supabase
-      .from('student_statistics')
-      .upsert(studentStats, { onConflict: 'studentid' });
-    if (studentStatsError) throw studentStatsError;
-    console.log(`✅ Saved ${studentStats.length} student statistics`);
+    if (activitiesError) throw activitiesError;
 
-    // Calculate activity statistics
-    const activityStats = flatContent.map(activity => {
-      const activityCompletions = completionsData.filter(
-        c => c.activityid === activity.activityid && c.hascompletiontracking
-      );
+    // Get trackable activities count
+    const { count: trackableCount, error: trackableError } = await supabase
+      .from('activities')
+      .select('*', { count: 'exact', head: true })
+      .eq('course_id', parseInt(courseId))
+      .eq('has_completion', true);
 
-      const completed = activityCompletions.filter(c => c.iscompleted).length;
-      const passed = activityCompletions.filter(c => c.ispassed).length;
-      const failed = activityCompletions.filter(c => c.isfailed).length;
+    if (trackableError) throw trackableError;
 
-      return {
-        activityid: activity.activityid,
-        activityname: activity.activityname,
-        activitytype: activity.activitytype,
-        sectionname: activity.sectionname,
-        published: activity.published,
-        hastracking: activity.hascompletion,
-        totalstudents: students.length,
-        studentscompleted: completed,
-        studentspassed: passed,
-        studentsfailed: failed,
-        studentsnotstarted: students.length - completed,
-        completionrate: students.length > 0 ? ((completed / students.length) * 100).toFixed(2) : 0,
-        passrate: completed > 0 ? ((passed / completed) * 100).toFixed(2) : 0,
-        addeddate: activity.addeddate,
-        expectedcompletiondate: activity.completionexpecteddate
-      };
-    });
+    // Get completion statistics
+    const { data: completionStats, error: statsError } = await supabase
+      .from('course_completions')
+      .select('completion_percentage, is_course_completed')
+      .eq('course_id', parseInt(courseId));
 
-    // Save activity statistics
-    const { error: activityStatsError } = await supabase
-      .from('activity_statistics')
-      .upsert(activityStats, { onConflict: 'activityid' });
-    if (activityStatsError) throw activityStatsError;
-    console.log(`✅ Saved ${activityStats.length} activity statistics`);
+    if (statsError) throw statsError;
 
-    // Final response
+    const avgCompletion = completionStats.length > 0
+      ? completionStats.reduce((sum, s) => sum + parseFloat(s.completion_percentage), 0) / completionStats.length
+      : 0;
+
+    const completedStudents = completionStats.filter(s => s.is_course_completed).length;
+
     res.json({
       success: true,
-      message: `Course ${courseIdNum} data uploaded successfully`,
-      data: {
-        students: studentsData.length,
-        activities: flatContent.length,
-        completions: completionsData.length,
-        studentStatistics: studentStats.length,
-        activityStatistics: activityStats.length
-      },
       course: {
-        id: courseIdNum,
-        name: contents[0]?.name || `Course ${courseIdNum}`
+        ...courseData,
+        enrolled_students: enrollmentCount,
+        total_activities: activitiesCount,
+        trackable_activities: trackableCount,
+        avg_completion_percentage: avgCompletion.toFixed(2),
+        students_completed: completedStudents
       }
     });
-    
+
   } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error('Error fetching course details:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 2. Simple health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'Course Data API is running',
-    timestamp: new Date().toISOString()
-  });
-});
+// ============================================================================
+// ENDPOINT 3: GET STUDENTS ENROLLED IN A COURSE
+// With Completion Status
+// ============================================================================
 
-// 3. Get database statistics
-app.get('/api/stats', async (req, res) => {
+app.get('/api/courses/:courseId/students', async (req, res) => {
   try {
-    const [
-      { count: studentCount },
-      { count: activityCount },
-      { count: completionCount },
-      { count: studentStatsCount },
-      { count: activityStatsCount }
-    ] = await Promise.all([
-      supabase.from('students').select('*', { count: 'exact', head: true }),
-      supabase.from('course_content').select('*', { count: 'exact', head: true }),
-      supabase.from('completions').select('*', { count: 'exact', head: true }),
-      supabase.from('student_statistics').select('*', { count: 'exact', head: true }),
-      supabase.from('activity_statistics').select('*', { count: 'exact', head: true })
-    ]);
+    const { courseId } = req.params;
+    const { status, search, page = 1, limit = 50 } = req.query;
 
-    res.json({
-      students: studentCount,
-      activities: activityCount,
-      completions: completionCount,
-      studentStatistics: studentStatsCount,
-      activityStatistics: activityStatsCount
-    });
-    
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+    let query = supabase
+      .from('student_course_progress')
+      .select('*', { count: 'exact' })
+      .eq('course_id', parseInt(courseId));
 
-// Add these after your existing API routes in api-server.js
-
-// 6. Get all students with complete data
-app.get('/api/students', async (req, res) => {
-  try {
-    const { page = 1, limit = 50, active_only } = req.query;
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const offset = (pageNum - 1) * limitNum;
-
-    console.log('📚 Fetching all students data...');
-
-    // Step 1: Get all students with pagination
-    console.log('📋 Step 1: Fetching students...');
-    let studentsQuery = supabase
-      .from('students')
-      .select('*')
-      .order('lastaccess', { ascending: false })
-      .range(offset, offset + limitNum - 1);
-
-    const { data: students, error: studentsError, count } = await studentsQuery;
-    if (studentsError) throw studentsError;
-
-    // Step 2: Get statistics for all students
-    console.log('📋 Step 2: Fetching student statistics...');
-    const studentIds = students.map(s => s.id);
-    
-    const { data: studentStats, error: statsError } = await supabase
-      .from('student_statistics')
-      .select('*')
-      .in('studentid', studentIds);
-
-    if (statsError) throw statsError;
-
-    // Create statistics map
-    const statsMap = {};
-    studentStats.forEach(stat => {
-      statsMap[stat.studentid] = stat;
-    });
-
-    // Step 3: Get recent completions for activity context
-    console.log('📋 Step 3: Fetching recent completions...');
-    const { data: recentCompletions, error: completionsError } = await supabase
-      .from('completions')
-      .select('studentid, completiondate, activityname')
-      .in('studentid', studentIds)
-      .not('completiondate', 'is', null)
-      .order('completiondate', { ascending: false })
-      .limit(500); // Limit to recent completions
-
-    if (completionsError) throw completionsError;
-
-    // Group recent completions by student
-    const recentCompletionsMap = {};
-    recentCompletions.forEach(comp => {
-      if (!recentCompletionsMap[comp.studentid]) {
-        recentCompletionsMap[comp.studentid] = [];
+    if (status) {
+      if (status === 'completed') {
+        query = query.eq('is_course_completed', true);
+      } else if (status === 'incomplete') {
+        query = query.eq('is_course_completed', false);
       }
-      if (recentCompletionsMap[comp.studentid].length < 5) { // Max 5 recent activities per student
-        recentCompletionsMap[comp.studentid].push({
-          activityName: comp.activityname,
-          completionDate: comp.completiondate
-        });
-      }
-    });
-
-    // Step 4: Combine all data
-    console.log('📋 Step 4: Combining data...');
-    const studentsWithData = students.map(student => {
-      const statistics = statsMap[student.id] || {};
-      const recentActivities = recentCompletionsMap[student.id] || [];
-      
-      // Calculate activity status
-      const isActive = student.lastaccess ? 
-        (Date.now() - new Date(student.lastaccess).getTime()) / (1000 * 60 * 60 * 24) <= 7 : false;
-
-      return {
-        id: student.id,
-        username: student.username,
-        firstname: student.firstname,
-        lastname: student.lastname,
-        fullname: student.fullname,
-        email: student.email,
-        roles: student.roles,
-        firstAccess: student.firstaccess,
-        lastAccess: student.lastaccess,
-        lastCourseAccess: student.lastcourseaccess,
-        enrolledCourses: student.enrolledcourses,
-        isActive: isActive,
-        statistics: {
-          totalActivities: statistics.totalactivities || 0,
-          activitiesCompleted: statistics.activitiescompleted || 0,
-          activitiesPassed: statistics.activitiespassed || 0,
-          activitiesFailed: statistics.activitiesfailed || 0,
-          completionPercentage: statistics.completionpercentage || 0,
-          passPercentage: statistics.passpercentage || 0,
-          performanceLevel: statistics.performancelevel || 'Unknown'
-        },
-        recentActivities: recentActivities,
-        lastActivity: recentActivities.length > 0 ? recentActivities[0].completionDate : null
-      };
-    });
-
-    // Apply active_only filter if requested
-    let filteredStudents = studentsWithData;
-    if (active_only === 'true') {
-      filteredStudents = studentsWithData.filter(student => student.isActive);
     }
 
-    // Step 5: Prepare response with pagination info
-    const response = {
-      success: true,
-      data: {
-        students: filteredStudents,
-        pagination: {
-          page: pageNum,
-          limit: limitNum,
-          total: count || 0,
-          totalPages: Math.ceil((count || 0) / limitNum),
-          showing: filteredStudents.length
-        },
-        summary: {
-          totalStudents: filteredStudents.length,
-          activeStudents: filteredStudents.filter(s => s.isActive).length,
-          averageCompletion: filteredStudents.length > 0 ? 
-            (filteredStudents.reduce((sum, student) => sum + (student.statistics.completionPercentage || 0), 0) / filteredStudents.length).toFixed(2) : 0,
-          topPerformer: filteredStudents.length > 0 ? 
-            filteredStudents.reduce((top, current) => 
-              (current.statistics.completionPercentage > (top?.statistics.completionPercentage || 0) ? current : top)
-            ) : null
-        }
-      }
-    };
+    if (search) {
+      query = query.or(`student_name.ilike.%${search}%,student_email.ilike.%${search}%`);
+    }
 
-    console.log(`✅ Retrieved ${filteredStudents.length} students`);
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
+    // Pagination
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    query = query.range(offset, offset + parseInt(limit) - 1);
+
+    const { data, error, count } = await query.order('student_name');
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      students: data,
+      pagination: {
+        total: count,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(count / parseInt(limit))
+      }
     });
+
+  } catch (error) {
+    console.error('Error fetching students:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 7. Get all enrolled students with course details
-// 7. Get all enrolled students with course details - CORRECTED VERSION
-app.get('/api/enrollments', async (req, res) => {
+// ============================================================================
+// ENDPOINT 4: GET ACTIVITIES/CLASSES IN A COURSE
+// Per Course: Which Classes Are Completed
+// ============================================================================
+
+app.get('/api/courses/:courseId/activities', async (req, res) => {
   try {
-    const { course, status, performance } = req.query;
-    
-    console.log('📚 Fetching all enrolled students with course details...');
+    const { courseId } = req.params;
+    const { sectionNumber, activityType, hasCompletion } = req.query;
 
-    // Step 1: Get all students with their statistics
-    console.log('📋 Step 1: Fetching students and statistics...');
-    const { data: students, error: studentsError } = await supabase
-      .from('students')
+    let query = supabase
+      .from('activity_completion_by_course')
       .select('*')
-      .order('lastaccess', { ascending: false });
+      .eq('course_id', parseInt(courseId));
 
-    if (studentsError) throw studentsError;
+    if (sectionNumber) {
+      query = query.eq('section_number', parseInt(sectionNumber));
+    }
 
-    const studentIds = students.map(s => s.id);
+    if (activityType && activityType !== 'all') {
+      query = query.eq('activity_type', activityType);
+    }
 
-    // Step 2: Get all student statistics
-    const { data: studentStats, error: statsError } = await supabase
-      .from('student_statistics')
-      .select('*')
-      .in('studentid', studentIds);
+    const { data, error } = await query.order('section_number').order('activity_name');
 
-    if (statsError) throw statsError;
+    if (error) throw error;
 
-    const statsMap = {};
-    studentStats.forEach(stat => {
-      statsMap[stat.studentid] = stat;
-    });
-
-    // Step 3: Get course completion data
-    console.log('📋 Step 2: Fetching course completion data...');
-    const { data: completions, error: completionsError } = await supabase
-      .from('completions')
-      .select('studentid, sectionname, sectionnumber, activityname, activitytype, iscompleted, completiondate')
-      .in('studentid', studentIds);
-
-    if (completionsError) throw completionsError;
-
-    // Step 4: Organize completions by student and course
-    console.log('📋 Step 3: Organizing course data...');
-    const studentCourses = {};
-
-    completions.forEach(comp => {
-      const studentId = comp.studentid;
-      const courseName = comp.sectionname || 'Uncategorized';
-      
-      if (!studentCourses[studentId]) {
-        studentCourses[studentId] = {};
-      }
-      
-      if (!studentCourses[studentId][courseName]) {
-        studentCourses[studentId][courseName] = {
-          courseName: courseName,
-          sectionNumber: comp.sectionnumber,
-          totalActivities: 0,
-          completedActivities: 0,
+    // Group by sections
+    const sections = {};
+    data.forEach(activity => {
+      const sectionKey = activity.section_number;
+      if (!sections[sectionKey]) {
+        sections[sectionKey] = {
+          section_number: activity.section_number,
+          section_name: activity.section_name,
           activities: []
         };
       }
-      
-      studentCourses[studentId][courseName].totalActivities++;
-      if (comp.iscompleted) {
-        studentCourses[studentId][courseName].completedActivities++;
-      }
-      
-      studentCourses[studentId][courseName].activities.push({
-        activityName: comp.activityname,
-        activityType: comp.activitytype,
-        isCompleted: comp.iscompleted,
-        completionDate: comp.completiondate
-      });
+      sections[sectionKey].activities.push(activity);
     });
 
-    // Step 5: Combine all data with CORRECTED LOGIC
-    console.log('📋 Step 4: Combining enrollment data...');
-    const enrollments = students.map(student => {
-      const statistics = statsMap[student.id] || {};
-      const courses = studentCourses[student.id] ? Object.values(studentCourses[student.id]) : [];
-      
-      const isActive = student.lastaccess ? 
-        (Date.now() - new Date(student.lastaccess).getTime()) / (1000 * 60 * 60 * 24) <= 7 : false;
-
-      const performanceLevel = statistics.performancelevel || 'Unknown';
-
-      // CORRECTED: Calculate favorite course based on completion percentage
-      let favoriteCourse = 'None';
-      if (courses.length > 0) {
-        const coursesWithCompletion = courses.filter(course => course.totalActivities > 0);
-        if (coursesWithCompletion.length > 0) {
-          // Find course with highest completion percentage
-          favoriteCourse = coursesWithCompletion.reduce((fav, current) => {
-            const currentCompletion = (current.completedActivities / current.totalActivities) * 100;
-            const favCompletion = (fav.completedActivities / fav.totalActivities) * 100;
-            return currentCompletion > favCompletion ? current : fav;
-          }).courseName;
-        } else {
-          // If no completions, pick the course with most activities
-          favoriteCourse = courses.reduce((fav, current) => 
-            current.totalActivities > fav.totalActivities ? current : fav
-          ).courseName;
-        }
-      }
-
-      // CORRECTED: Calculate active courses (courses with any completion)
-      const activeCourses = courses.filter(course => course.completedActivities > 0).length;
-
-      return {
-        student: {
-          id: student.id,
-          fullname: student.fullname,
-          email: student.email,
-          username: student.username,
-          roles: student.roles,
-          firstAccess: student.firstaccess,
-          lastAccess: student.lastaccess,
-          isActive: isActive
-        },
-        overallStatistics: {
-          totalActivities: statistics.totalactivities || 0,
-          activitiesCompleted: statistics.activitiescompleted || 0,
-          completionPercentage: statistics.completionpercentage || 0,
-          passPercentage: statistics.passpercentage || 0,
-          performanceLevel: performanceLevel
-        },
-        enrolledCourses: courses.map(course => ({
-          ...course,
-          completionPercentage: course.totalActivities > 0 ? 
-            ((course.completedActivities / course.totalActivities) * 100).toFixed(2) : 0
-        })),
-        summary: {
-          totalCourses: courses.length,
-          activeCourses: activeCourses, // CORRECTED: Use calculated active courses
-          favoriteCourse: favoriteCourse // CORRECTED: Use proper favorite course logic
-        }
-      };
-    });
-
-    // Apply filters if provided
-    let filteredEnrollments = enrollments;
-
-    if (course) {
-      filteredEnrollments = filteredEnrollments.filter(enrollment => 
-        enrollment.enrolledCourses.some(c => 
-          c.courseName.toLowerCase().includes(course.toLowerCase())
-        )
-      );
-    }
-
-    if (status === 'active') {
-      filteredEnrollments = filteredEnrollments.filter(enrollment => enrollment.student.isActive);
-    } else if (status === 'inactive') {
-      filteredEnrollments = filteredEnrollments.filter(enrollment => !enrollment.student.isActive);
-    }
-
-    if (performance) {
-      filteredEnrollments = filteredEnrollments.filter(enrollment => 
-        enrollment.overallStatistics.performanceLevel.toLowerCase() === performance.toLowerCase()
-      );
-    }
-
-    // CORRECTED: Ensure summary matches actual data
-    const actualStudentCount = filteredEnrollments.length;
-    const activeStudentCount = filteredEnrollments.filter(e => e.student.isActive).length;
-
-    // Step 6: Prepare response with CORRECTED SUMMARY
-    const response = {
+    res.json({
       success: true,
-      data: {
-        enrollments: filteredEnrollments,
-        summary: {
-          totalStudents: actualStudentCount, // CORRECTED: Use actual count
-          activeStudents: activeStudentCount, // CORRECTED: Use actual count
-          totalCourses: [...new Set(filteredEnrollments.flatMap(e => e.enrolledCourses.map(c => c.courseName)))].length,
-          averageCompletion: filteredEnrollments.length > 0 ? 
-            (filteredEnrollments.reduce((sum, enrollment) => sum + (enrollment.overallStatistics.completionPercentage || 0), 0) / filteredEnrollments.length).toFixed(2) : 0,
-          performanceDistribution: {
-            excellent: filteredEnrollments.filter(e => e.overallStatistics.performanceLevel === 'Excellent').length,
-            good: filteredEnrollments.filter(e => e.overallStatistics.performanceLevel === 'Good').length,
-            average: filteredEnrollments.filter(e => e.overallStatistics.performanceLevel === 'Average').length,
-            belowAverage: filteredEnrollments.filter(e => e.overallStatistics.performanceLevel === 'Below Average').length,
-            poor: filteredEnrollments.filter(e => e.overallStatistics.performanceLevel === 'Poor').length
-          }
-        }
-      }
-    };
-
-    console.log(`✅ Retrieved ${filteredEnrollments.length} student enrollments`);
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
+      activities: data,
+      sections: Object.values(sections)
     });
+
+  } catch (error) {
+    console.error('Error fetching activities:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 8. Get students summary dashboard
-app.get('/api/students/summary', async (req, res) => {
+// ============================================================================
+// ENDPOINT 5: GET STUDENT PROGRESS IN A COURSE
+// Individual Student: Which Classes Completed
+// ============================================================================
+
+app.get('/api/courses/:courseId/students/:studentId/progress', async (req, res) => {
   try {
-    console.log('📊 Generating students summary dashboard...');
+    const { courseId, studentId } = req.params;
 
-    // Get all students count
-    const { count: totalStudents, error: studentsError } = await supabase
-      .from('students')
-      .select('*', { count: 'exact', head: true });
+    // Get student enrollment info
+    const { data: enrollment, error: enrollError } = await supabase
+      .from('enrollments')
+      .select('*')
+      .eq('course_id', parseInt(courseId))
+      .eq('student_id', parseInt(studentId))
+      .single();
 
-    if (studentsError) throw studentsError;
+    if (enrollError) throw enrollError;
 
-    // Get active students (accessed in last 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    
-    const { count: activeStudents, error: activeError } = await supabase
-      .from('students')
-      .select('*', { count: 'exact', head: true })
-      .gt('lastaccess', sevenDaysAgo.toISOString());
+    if (!enrollment) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Student not enrolled in this course' 
+      });
+    }
 
-    if (activeError) throw activeError;
+    // Get all activities in the course
+    const { data: activities, error: activitiesError } = await supabase
+      .from('activities')
+      .select('*')
+      .eq('course_id', parseInt(courseId))
+      .eq('has_completion', true);
 
-    // Get student statistics for averages
-    const { data: studentStats, error: statsError } = await supabase
-      .from('student_statistics')
-      .select('completionpercentage, passpercentage, performancelevel');
+    if (activitiesError) throw activitiesError;
+
+    // Get student's completions
+    const { data: completions, error: completionsError } = await supabase
+      .from('activity_completions')
+      .select('*')
+      .eq('course_id', parseInt(courseId))
+      .eq('student_id', parseInt(studentId));
+
+    if (completionsError) throw completionsError;
+
+    // Create completion map
+    const completionMap = {};
+    completions.forEach(c => {
+      completionMap[c.activity_id] = c;
+    });
+
+    // Combine activities with completion status
+    const activitiesWithCompletion = activities.map(activity => ({
+      ...activity,
+      completion: completionMap[activity.activity_id] || {
+        is_completed: false,
+        is_passed: false,
+        is_failed: false,
+        time_completed: null
+      }
+    }));
+
+    // Group by sections
+    const sections = {};
+    activitiesWithCompletion.forEach(activity => {
+      const sectionKey = activity.section_number;
+      if (!sections[sectionKey]) {
+        sections[sectionKey] = {
+          section_number: activity.section_number,
+          section_name: activity.section_name,
+          activities: [],
+          total: 0,
+          completed: 0
+        };
+      }
+      sections[sectionKey].activities.push(activity);
+      sections[sectionKey].total++;
+      if (activity.completion.is_completed) {
+        sections[sectionKey].completed++;
+      }
+    });
+
+    // Calculate summary
+    const totalActivities = activities.length;
+    const completedActivities = completions.filter(c => c.is_completed).length;
+    const passedActivities = completions.filter(c => c.is_passed).length;
+    const failedActivities = completions.filter(c => c.is_failed).length;
+
+    res.json({
+      success: true,
+      student: enrollment,
+      summary: {
+        total_activities: totalActivities,
+        completed_activities: completedActivities,
+        passed_activities: passedActivities,
+        failed_activities: failedActivities,
+        completion_percentage: totalActivities > 0 
+          ? ((completedActivities / totalActivities) * 100).toFixed(2)
+          : 0
+      },
+      sections: Object.values(sections).sort((a, b) => a.section_number - b.section_number),
+      activities: activitiesWithCompletion
+    });
+
+  } catch (error) {
+    console.error('Error fetching student progress:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE
+// ============================================================================
+
+app.get('/api/courses/:courseId/stats', async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    // Get overall stats from view
+    const { data: stats, error: statsError } = await supabase
+      .from('course_completion_stats')
+      .select('*')
+      .eq('course_id', parseInt(courseId))
+      .single();
 
     if (statsError) throw statsError;
 
-    // Calculate averages
-    const avgCompletion = studentStats.length > 0 ? 
-      (studentStats.reduce((sum, stat) => sum + (stat.completionpercentage || 0), 0) / studentStats.length).toFixed(2) : 0;
-    
-    const avgPassRate = studentStats.length > 0 ? 
-      (studentStats.reduce((sum, stat) => sum + (stat.passpercentage || 0), 0) / studentStats.length).toFixed(2) : 0;
+    // Get completion by activity type
+    const { data: activities, error: activitiesError } = await supabase
+      .from('activity_completion_by_course')
+      .select('*')
+      .eq('course_id', parseInt(courseId));
 
-    // Performance distribution
-    const performanceDistribution = {
-      excellent: studentStats.filter(s => s.performancelevel === 'Excellent').length,
-      good: studentStats.filter(s => s.performancelevel === 'Good').length,
-      average: studentStats.filter(s => s.performancelevel === 'Average').length,
-      belowAverage: studentStats.filter(s => s.performancelevel === 'Below Average').length,
-      poor: studentStats.filter(s => s.performancelevel === 'Poor').length
-    };
+    if (activitiesError) throw activitiesError;
 
-    // Get recent activity
-    const { data: recentCompletions, error: recentError } = await supabase
-      .from('completions')
-      .select('completiondate')
-      .not('completiondate', 'is', null)
-      .order('completiondate', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (recentError && recentError.code !== 'PGRST116') throw recentError;
-
-    const response = {
-      success: true,
-      data: {
-        overview: {
-          totalStudents: totalStudents || 0,
-          activeStudents: activeStudents || 0,
-          inactiveStudents: (totalStudents || 0) - (activeStudents || 0),
-          activityRate: totalStudents > 0 ? ((activeStudents / totalStudents) * 100).toFixed(2) : 0
-        },
-        performance: {
-          averageCompletion: avgCompletion,
-          averagePassRate: avgPassRate,
-          distribution: performanceDistribution
-        },
-        recentActivity: {
-          lastCompletion: recentCompletions?.completiondate || null,
-          lastUpdate: new Date().toISOString()
-        },
-        courses: {
-          // This would need a courses table to be accurate
-          totalEnrolled: 'N/A',
-          averageCoursesPerStudent: 'N/A'
-        }
+    // Group by activity type
+    const byType = {};
+    activities.forEach(activity => {
+      if (!byType[activity.activity_type]) {
+        byType[activity.activity_type] = {
+          total: 0,
+          avg_completion_rate: 0,
+          activities: []
+        };
       }
-    };
-
-    console.log('✅ Students summary dashboard generated');
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
+      byType[activity.activity_type].total++;
+      byType[activity.activity_type].activities.push(activity);
     });
+
+    // Calculate average completion rate per type
+    Object.keys(byType).forEach(type => {
+      const avgRate = byType[type].activities.reduce(
+        (sum, a) => sum + parseFloat(a.completion_rate || 0), 0
+      ) / byType[type].total;
+      byType[type].avg_completion_rate = avgRate.toFixed(2);
+    });
+
+    // Get completion by section
+    const bySection = {};
+    activities.forEach(activity => {
+      const key = activity.section_number;
+      if (!bySection[key]) {
+        bySection[key] = {
+          section_number: activity.section_number,
+          section_name: activity.section_name,
+          total_activities: 0,
+          avg_completion_rate: 0,
+          activities: []
+        };
+      }
+      bySection[key].total_activities++;
+      bySection[key].activities.push(activity);
+    });
+
+    // Calculate average completion rate per section
+    Object.keys(bySection).forEach(key => {
+      const avgRate = bySection[key].activities.reduce(
+        (sum, a) => sum + parseFloat(a.completion_rate || 0), 0
+      ) / bySection[key].total_activities;
+      bySection[key].avg_completion_rate = avgRate.toFixed(2);
+    });
+
+    res.json({
+      success: true,
+      stats: {
+        ...stats,
+        by_activity_type: byType,
+        by_section: Object.values(bySection).sort((a, b) => a.section_number - b.section_number)
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching course stats:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Helper functions
-function formatTimestamp(timestamp) {
-  if (!timestamp || timestamp === 0) return null;
-  return new Date(timestamp * 1000).toISOString().replace("T", " ").substring(0, 19);
-}
+// ============================================================================
+// ENDPOINT 7: FILTER STUDENTS BY COMPLETION CRITERIA
+// ============================================================================
 
-function getCompletionStatus(state) {
-  const statuses = {
-    0: "Incomplete",
-    1: "Complete",
-    2: "Complete (Passed)",
-    3: "Complete (Failed)",
-  };
-  return statuses[state] || "Unknown";
-}
+app.get('/api/students/filter', async (req, res) => {
+  try {
+    const {
+      courseId,
+      minCompletion,
+      maxCompletion,
+      isCompleted,
+      search,
+      page = 1,
+      limit = 50
+    } = req.query;
 
-function getTrackingType(tracking) {
-  const types = {
-    0: "None",
-    1: "Manual",
-    2: "Automatic",
-  };
-  return types[tracking] || "Unknown";
-}
+    let query = supabase
+      .from('student_course_progress')
+      .select('*', { count: 'exact' });
 
-function isStudentActive(student) {
-  if (!student.lastcourseaccess) return false;
-  const lastAccess = new Date(student.lastcourseaccess);
-  const daysSinceAccess = (Date.now() - lastAccess.getTime()) / (1000 * 60 * 60 * 24);
-  return daysSinceAccess <= 7;
-}
+    if (courseId) {
+      query = query.eq('course_id', parseInt(courseId));
+    }
 
-function getPerformanceLevel(completionRate) {
-  if (completionRate >= 0.9) return "Excellent";
-  if (completionRate >= 0.7) return "Good";
-  if (completionRate >= 0.5) return "Average";
-  if (completionRate >= 0.3) return "Below Average";
-  return "Poor";
-}
+    if (minCompletion) {
+      query = query.gte('completion_percentage', parseFloat(minCompletion));
+    }
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Course Data API Server running on port ${PORT}`);
-  console.log(`📚 Available endpoints (NO BODY REQUIRED):`);
-  console.log(`   POST /api/courses/:courseId/upload  - Upload complete course data`);
-  console.log(`   GET  /api/health                    - Health check`);
-  console.log(`   GET  /api/stats                     - Get database statistics`);
-  console.log(`\n💡 Example: POST http://localhost:${PORT}/api/courses/5/upload`);
+    if (maxCompletion) {
+      query = query.lte('completion_percentage', parseFloat(maxCompletion));
+    }
+
+    if (isCompleted !== undefined) {
+      query = query.eq('is_course_completed', isCompleted === 'true');
+    }
+
+    if (search) {
+      query = query.or(`student_name.ilike.%${search}%,student_email.ilike.%${search}%`);
+    }
+
+    // Pagination
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    query = query.range(offset, offset + parseInt(limit) - 1);
+
+    const { data, error, count } = await query.order('completion_percentage', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      students: data,
+      pagination: {
+        total: count,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(count / parseInt(limit))
+      }
+    });
+
+  } catch (error) {
+    console.error('Error filtering students:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
+
+// ============================================================================
+// ENDPOINT 8: GET FILTER OPTIONS
+// ============================================================================
+
+// Get all courses for dropdown
+app.get('/api/filters/courses', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('courses')
+      .select('course_id, short_name, full_name')
+      .eq('visible', true)
+      .order('full_name');
+
+    if (error) throw error;
+
+    res.json({ success: true, courses: data });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get activity types for a course
+app.get('/api/filters/activity-types', async (req, res) => {
+  try {
+    const { courseId } = req.query;
+
+    let query = supabase
+      .from('activities')
+      .select('activity_type');
+
+    if (courseId) {
+      query = query.eq('course_id', parseInt(courseId));
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw error;
+
+    const uniqueTypes = [...new Set(data.map(item => item.activity_type))].sort();
+
+    res.json({ success: true, activityTypes: uniqueTypes });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get sections for a course
+app.get('/api/filters/sections', async (req, res) => {
+  try {
+    const { courseId } = req.query;
+
+    if (!courseId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'courseId is required' 
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('activities')
+      .select('section_number, section_name')
+      .eq('course_id', parseInt(courseId));
+
+    if (error) throw error;
+
+    const uniqueSections = [...new Map(
+      data.map(item => [item.section_number, {
+        number: item.section_number,
+        name: item.section_name
+      }])
+    ).values()].sort((a, b) => a.number - b.number);
+
+    res.json({ success: true, sections: uniqueSections });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// ENDPOINT 9: EXPORT DATA
+// ============================================================================
+
+app.get('/api/export/course/:courseId', async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { format = 'students' } = req.query;
+
+    let data, headers;
+
+    if (format === 'students') {
+      // Export student progress
+      const { data: students, error } = await supabase
+        .from('student_course_progress')
+        .select('*')
+        .eq('course_id', parseInt(courseId));
+
+      if (error) throw error;
+      data = students;
+      headers = ['student_id', 'student_name', 'student_email', 'total_activities', 
+                 'completed_activities', 'completion_percentage', 'is_course_completed'];
+    } else if (format === 'activities') {
+      // Export activities
+      const { data: activities, error } = await supabase
+        .from('activity_completion_by_course')
+        .select('*')
+        .eq('course_id', parseInt(courseId));
+
+      if (error) throw error;
+      data = activities;
+      headers = ['activity_id', 'activity_name', 'activity_type', 'section_name', 
+                 'total_students', 'students_completed', 'completion_rate'];
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).json({ success: false, error: 'No data to export' });
+    }
+
+    // Create CSV
+    const csvHeaders = headers.join(',');
+    const csvRows = data.map(row =>
+      headers.map(header => {
+        const val = row[header];
+        return typeof val === 'string' && val.includes(',') ? `"${val}"` : val;
+      }).join(',')
+    );
+
+    const csv = [csvHeaders, ...csvRows].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=course_${courseId}_${format}.csv`);
+    res.send(csv);
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// HEALTH CHECK
+// ============================================================================
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ============================================================================
+// START SERVER
+// ============================================================================
+
+app.listen(PORT, () => {
+  console.log('='.repeat(80));
+  console.log('🚀 MOODLE COURSE ENROLLMENT & COMPLETION API');
+  console.log('='.repeat(80));
+  console.log(`✅ Server: http://localhost:${PORT}`);
+  console.log(`✅ Supabase: ${process.env.SUPABASE_URL}`);
+  console.log('\n📊 KEY FEATURES:');
+  console.log('  ✓ Per course: How many students enrolled');
+  console.log('  ✓ Per course: Which classes/activities completed');
+  console.log('  ✓ Student progress tracking');
+  console.log('  ✓ Completion statistics');
+  console.log('\n📊 API ENDPOINTS:');
+  console.log('─'.repeat(80));
+  console.log('COURSES:');
+  console.log(`  GET  /api/courses                              - All courses with enrollment`);
+  console.log(`  GET  /api/courses/:courseId                    - Course details + stats`);
+  console.log(`  GET  /api/courses/:courseId/students           - Students in course`);
+  console.log(`  GET  /api/courses/:courseId/activities         - Activities/classes in course`);
+  console.log(`  GET  /api/courses/:courseId/stats              - Course completion stats`);
+  console.log('\nSTUDENTS:');
+  console.log(`  GET  /api/courses/:courseId/students/:studentId/progress - Student progress`);
+  console.log(`  GET  /api/students/filter                      - Filter students by completion`);
+  console.log('\nFILTERS:');
+  console.log(`  GET  /api/filters/courses                      - Course list for dropdown`);
+  console.log(`  GET  /api/filters/activity-types               - Activity types`);
+  console.log(`  GET  /api/filters/sections                     - Sections in course`);
+  console.log('\nEXPORT:');
+  console.log(`  GET  /api/export/course/:courseId?format=students|activities`);
+  console.log('='.repeat(80));
+});
+
+module.exports = app;
