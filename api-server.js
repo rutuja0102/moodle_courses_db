@@ -18,7 +18,7 @@ app.use(cors({
     'http://localhost:3001', 
     'http://localhost:5173',
     'http://localhost:5174',
-    'https://moodle-fe.onrender.com/'
+    'https://moodle-fe.onrender.com'
   ].filter(Boolean),
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
