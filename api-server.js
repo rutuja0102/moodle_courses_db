@@ -45,9 +45,9 @@ app.use((req, res, next) => {
 
 app.get('/api/courses', async (req, res) => {
   try {
-    const { visible, search } = req.query;
+    const { visible, search, month, year, dateField = 'created_at' } = req.query;
 
-    // Use the view for efficient querying
+    // Use your existing view for basic data
     let query = supabase
       .from('course_enrollment_summary')
       .select('*');
@@ -60,13 +60,66 @@ app.get('/api/courses', async (req, res) => {
       query = query.or(`full_name.ilike.%${search}%,short_name.ilike.%${search}%`);
     }
 
-    const { data, error } = await query.order('full_name');
-
+    const { data: summaryData, error } = await query.order('full_name');
     if (error) throw error;
+
+    // If monthly filter is applied, we need to filter by date from the courses table
+    let filteredData = summaryData;
+    
+    if (month && year) {
+      const monthNum = parseInt(month);
+      const yearNum = parseInt(year);
+      
+      // Validate month and year
+      if (monthNum < 1 || monthNum > 12) {
+        return res.status(400).json({
+          success: false,
+          error: 'Month must be between 1 and 12'
+        });
+      }
+
+      if (yearNum < 2000 || yearNum > 2100) {
+        return res.status(400).json({
+          success: false,
+          error: 'Year must be between 2000 and 2100'
+        });
+      }
+
+      // Get course IDs that match the date filter
+      const startDate = new Date(yearNum, monthNum - 1, 1);
+      const endDate = new Date(yearNum, monthNum, 0, 23, 59, 59, 999);
+
+      const validDateFields = ['created_at', 'updated_at', 'start_date', 'end_date'];
+      const actualDateField = validDateFields.includes(dateField) ? dateField : 'created_at';
+
+      const { data: filteredCourses } = await supabase
+        .from('courses')
+        .select('course_id')
+        .gte(actualDateField, startDate.toISOString())
+        .lte(actualDateField, endDate.toISOString());
+
+      const filteredCourseIds = filteredCourses?.map(c => c.course_id) || [];
+      
+      // Filter the summary data by course IDs that match the date criteria
+      filteredData = summaryData.filter(course => 
+        filteredCourseIds.includes(course.course_id)
+      );
+    } else if (month || year) {
+      return res.status(400).json({
+        success: false,
+        error: 'Both month and year parameters are required for monthly filtering'
+      });
+    }
 
     res.json({
       success: true,
-      courses: data
+      courses: filteredData,
+      filters: {
+        month: month || null,
+        year: year || null,
+        dateField: dateField,
+        total: filteredData.length
+      }
     });
 
   } catch (error) {
