@@ -39,6 +39,35 @@ app.use((req, res, next) => {
 });
 
 // ============================================================================
+// HELPER FUNCTION: Create Date Filter
+// ============================================================================
+
+function createMonthFilter(month, year) {
+  if (!month || !year) return null;
+
+  const monthNum = parseInt(month);
+  const yearNum = parseInt(year);
+  
+  if (monthNum < 1 || monthNum > 12) {
+    throw new Error('Month must be between 1 and 12');
+  }
+
+  if (yearNum < 2000 || yearNum > 2100) {
+    throw new Error('Year must be between 2000 and 2100');
+  }
+
+  const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0));
+  const endDate = new Date(Date.UTC(yearNum, monthNum, 0, 23, 59, 59, 999));
+  
+  return { 
+    startDate: startDate.toISOString(), 
+    endDate: endDate.toISOString(),
+    month: monthNum,
+    year: yearNum
+  };
+}
+
+// ============================================================================
 // ENDPOINT 1: GET ALL COURSES WITH ENROLLMENT COUNT
 // Per Course: How Many Students Are Enrolled
 // ============================================================================
@@ -135,6 +164,7 @@ app.get('/api/courses', async (req, res) => {
 app.get('/api/courses/:courseId', async (req, res) => {
   try {
     const { courseId } = req.params;
+    const { month, year } = req.query;
 
     // Get course basic info
     const { data: courseData, error: courseError } = await supabase
@@ -152,7 +182,18 @@ app.get('/api/courses/:courseId', async (req, res) => {
       });
     }
 
-    // Get enrollment count
+    // Create date filter if month/year provided
+    let dateFilter = null;
+    try {
+      dateFilter = createMonthFilter(month, year);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    // Get enrollment count (always total, not filtered)
     const { count: enrollmentCount, error: enrollError } = await supabase
       .from('enrollments')
       .select('*', { count: 'exact', head: true })
@@ -161,7 +202,7 @@ app.get('/api/courses/:courseId', async (req, res) => {
 
     if (enrollError) throw enrollError;
 
-    // Get activities count
+    // Get activities count (always total)
     const { count: activitiesCount, error: activitiesError } = await supabase
       .from('activities')
       .select('*', { count: 'exact', head: true })
@@ -169,7 +210,7 @@ app.get('/api/courses/:courseId', async (req, res) => {
 
     if (activitiesError) throw activitiesError;
 
-    // Get trackable activities count
+    // Get trackable activities count (always total)
     const { count: trackableCount, error: trackableError } = await supabase
       .from('activities')
       .select('*', { count: 'exact', head: true })
@@ -178,31 +219,96 @@ app.get('/api/courses/:courseId', async (req, res) => {
 
     if (trackableError) throw trackableError;
 
-    // Get completion statistics
-    const { data: completionStats, error: statsError } = await supabase
+    // === FILTERED DATA (if dateFilter exists) ===
+    
+    // Get activity completions with optional date filter
+    let completionQuery = supabase
+      .from('activity_completions')
+      .select('student_id, activity_id, is_completed, time_completed')
+      .eq('course_id', parseInt(courseId))
+      .eq('is_completed', true);
+
+    if (dateFilter) {
+      completionQuery = completionQuery
+        .gte('time_completed', dateFilter.startDate)
+        .lte('time_completed', dateFilter.endDate)
+        .not('time_completed', 'is', null);
+    }
+
+    const { data: completionData, error: completionError } = await completionQuery;
+    if (completionError) throw completionError;
+
+    // Calculate unique students and activities that had completions in the period
+    const uniqueStudentsWithCompletions = new Set(
+      completionData.map(c => c.student_id)
+    ).size;
+
+    const uniqueActivitiesCompleted = new Set(
+      completionData.map(c => c.activity_id)
+    ).size;
+
+    const totalCompletionsInPeriod = completionData.length;
+
+    // Get course completion stats with optional date filter
+    let courseCompletionQuery = supabase
       .from('course_completions')
-      .select('completion_percentage, is_course_completed')
+      .select('completion_percentage, is_course_completed, student_id, completion_date')
       .eq('course_id', parseInt(courseId));
 
+    if (dateFilter) {
+      courseCompletionQuery = courseCompletionQuery
+        .gte('completion_date', dateFilter.startDate)
+        .lte('completion_date', dateFilter.endDate)
+        .eq('is_course_completed', true)
+        .not('completion_date', 'is', null);
+    }
+
+    const { data: completionStats, error: statsError } = await courseCompletionQuery;
     if (statsError) throw statsError;
 
+    // Calculate average completion percentage
     const avgCompletion = completionStats.length > 0
       ? completionStats.reduce((sum, s) => sum + parseFloat(s.completion_percentage), 0) / completionStats.length
       : 0;
 
     const completedStudents = completionStats.filter(s => s.is_course_completed).length;
 
-    res.json({
+    // Build response with clear separation of total vs filtered data
+    const response = {
       success: true,
       course: {
         ...courseData,
+        // TOTAL COUNTS (unfiltered)
         enrolled_students: enrollmentCount,
         total_activities: activitiesCount,
         trackable_activities: trackableCount,
-        avg_completion_percentage: avgCompletion.toFixed(2),
-        students_completed: completedStudents
+      },
+      filters: {
+        month: month || null,
+        year: year || null,
+        applied: !!dateFilter
       }
-    });
+    };
+
+    // Add filtered stats if monthly filter is applied
+    if (dateFilter) {
+      response.monthly_stats = {
+        unique_students_active: uniqueStudentsWithCompletions,
+        unique_activities_completed: uniqueActivitiesCompleted,
+        total_completions: totalCompletionsInPeriod,
+        students_who_completed_course: completedStudents,
+        avg_completion_percentage: parseFloat(avgCompletion.toFixed(2)),
+        period: `${dateFilter.month}/${dateFilter.year}`
+      };
+    } else {
+      // If no filter, show overall completion stats
+      response.overall_stats = {
+        avg_completion_percentage: parseFloat(avgCompletion.toFixed(2)),
+        students_completed: completedStudents
+      };
+    }
+
+    res.json(response);
 
   } catch (error) {
     console.error('Error fetching course details:', error);
@@ -211,19 +317,71 @@ app.get('/api/courses/:courseId', async (req, res) => {
 });
 
 // ============================================================================
-// ENDPOINT 3: GET STUDENTS ENROLLED IN A COURSE
-// With Completion Status
+// ENDPOINT 3: GET STUDENTS ENROLLED IN A COURSE (WITH MONTHLY FILTER)
 // ============================================================================
 
 app.get('/api/courses/:courseId/students', async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { status, search, page = 1, limit = 50 } = req.query;
+    const { status, search, page = 1, limit = 50, month, year } = req.query;
+
+    // Create date filter if month/year provided
+    let dateFilter = null;
+    try {
+      dateFilter = createMonthFilter(month, year);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    // If monthly filter is applied, get students who had completions in that period
+    let studentIds = null;
+    if (dateFilter) {
+      const { data: completionsInPeriod, error: compError } = await supabase
+        .from('activity_completions')
+        .select('student_id')
+        .eq('course_id', parseInt(courseId))
+        .gte('time_completed', dateFilter.startDate)
+        .lte('time_completed', dateFilter.endDate)
+        .eq('is_completed', true)
+        .not('time_completed', 'is', null);
+
+      if (compError) throw compError;
+
+      studentIds = [...new Set(completionsInPeriod?.map(c => c.student_id) || [])];
+      
+      // If no students had completions in this period, return empty result
+      if (studentIds.length === 0) {
+        return res.json({
+          success: true,
+          students: [],
+          pagination: {
+            total: 0,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            totalPages: 0
+          },
+          filters: {
+            month: month,
+            year: year,
+            applied: true,
+            message: `No students had activity completions in ${dateFilter.month}/${dateFilter.year}`
+          }
+        });
+      }
+    }
 
     let query = supabase
       .from('student_course_progress')
       .select('*', { count: 'exact' })
       .eq('course_id', parseInt(courseId));
+
+    // Filter by student IDs if monthly filter is applied
+    if (studentIds) {
+      query = query.in('student_id', studentIds);
+    }
 
     if (status) {
       if (status === 'completed') {
@@ -245,6 +403,35 @@ app.get('/api/courses/:courseId/students', async (req, res) => {
 
     if (error) throw error;
 
+    // If monthly filter is applied, add completion counts for the period
+    if (dateFilter && data.length > 0) {
+      const studentIdsInResults = data.map(s => s.student_id);
+      
+      // Get completion counts for each student in the period
+      const { data: monthlyCompletions, error: mcError } = await supabase
+        .from('activity_completions')
+        .select('student_id, activity_id, is_completed')
+        .eq('course_id', parseInt(courseId))
+        .in('student_id', studentIdsInResults)
+        .gte('time_completed', dateFilter.startDate)
+        .lte('time_completed', dateFilter.endDate)
+        .eq('is_completed', true)
+        .not('time_completed', 'is', null);
+
+      if (!mcError) {
+        // Count completions per student
+        const completionCounts = {};
+        monthlyCompletions.forEach(c => {
+          completionCounts[c.student_id] = (completionCounts[c.student_id] || 0) + 1;
+        });
+
+        // Add monthly completion data to each student
+        data.forEach(student => {
+          student.monthly_completions = completionCounts[student.student_id] || 0;
+        });
+      }
+    }
+
     res.json({
       success: true,
       students: data,
@@ -253,6 +440,14 @@ app.get('/api/courses/:courseId/students', async (req, res) => {
         page: parseInt(page),
         limit: parseInt(limit),
         totalPages: Math.ceil(count / parseInt(limit))
+      },
+      filters: {
+        month: month || null,
+        year: year || null,
+        applied: !!dateFilter,
+        description: dateFilter 
+          ? `Showing students who completed activities in ${dateFilter.month}/${dateFilter.year}` 
+          : 'Showing all enrolled students'
       }
     });
 
@@ -323,6 +518,18 @@ app.get('/api/courses/:courseId/activities', async (req, res) => {
 app.get('/api/courses/:courseId/students/:studentId/progress', async (req, res) => {
   try {
     const { courseId, studentId } = req.params;
+    const { month, year } = req.query;
+
+    // Create date filter if month/year provided
+    let dateFilter = null;
+    try {
+      dateFilter = createMonthFilter(month, year);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
+      });
+    }
 
     // Get student enrollment info
     const { data: enrollment, error: enrollError } = await supabase
@@ -350,12 +557,21 @@ app.get('/api/courses/:courseId/students/:studentId/progress', async (req, res) 
 
     if (activitiesError) throw activitiesError;
 
-    // Get student's completions
-    const { data: completions, error: completionsError } = await supabase
+    // Get student's completions (with optional date filter)
+    let completionsQuery = supabase
       .from('activity_completions')
       .select('*')
       .eq('course_id', parseInt(courseId))
       .eq('student_id', parseInt(studentId));
+
+    if (dateFilter) {
+      completionsQuery = completionsQuery
+        .gte('time_completed', dateFilter.startDate)
+        .lte('time_completed', dateFilter.endDate)
+        .not('time_completed', 'is', null);
+    }
+
+    const { data: completions, error: completionsError } = await completionsQuery;
 
     if (completionsError) throw completionsError;
 
@@ -402,7 +618,7 @@ app.get('/api/courses/:courseId/students/:studentId/progress', async (req, res) 
     const passedActivities = completions.filter(c => c.is_passed).length;
     const failedActivities = completions.filter(c => c.is_failed).length;
 
-    res.json({
+    const response = {
       success: true,
       student: enrollment,
       summary: {
@@ -415,8 +631,18 @@ app.get('/api/courses/:courseId/students/:studentId/progress', async (req, res) 
           : 0
       },
       sections: Object.values(sections).sort((a, b) => a.section_number - b.section_number),
-      activities: activitiesWithCompletion
-    });
+      activities: activitiesWithCompletion,
+      filters: {
+        month: month || null,
+        year: year || null,
+        applied: !!dateFilter,
+        description: dateFilter 
+          ? `Showing activities completed in ${dateFilter.month}/${dateFilter.year}` 
+          : 'Showing all activities with current completion status'
+      }
+    };
+
+    res.json(response);
 
   } catch (error) {
     console.error('Error fetching student progress:', error);
@@ -425,14 +651,26 @@ app.get('/api/courses/:courseId/students/:studentId/progress', async (req, res) 
 });
 
 // ============================================================================
-// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE
+// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE (WITH MONTHLY FILTER)
 // ============================================================================
 
 app.get('/api/courses/:courseId/stats', async (req, res) => {
   try {
     const { courseId } = req.params;
+    const { month, year } = req.query;
 
-    // Get overall stats from view
+    // Create date filter if month/year provided
+    let dateFilter = null;
+    try {
+      dateFilter = createMonthFilter(month, year);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    // Get overall stats from view (unfiltered baseline)
     const { data: stats, error: statsError } = await supabase
       .from('course_completion_stats')
       .select('*')
@@ -441,7 +679,7 @@ app.get('/api/courses/:courseId/stats', async (req, res) => {
 
     if (statsError) throw statsError;
 
-    // Get completion by activity type
+    // Get activities with completion data
     const { data: activities, error: activitiesError } = await supabase
       .from('activity_completion_by_course')
       .select('*')
@@ -449,7 +687,89 @@ app.get('/api/courses/:courseId/stats', async (req, res) => {
 
     if (activitiesError) throw activitiesError;
 
-    // Group by activity type
+    // If monthly filter is applied, recalculate stats based on completions in that period
+    let monthlyStats = null;
+    let monthlyByType = null;
+    let monthlyBySection = null;
+
+    if (dateFilter) {
+      // Get completions in the specified month
+      const { data: monthlyCompletions, error: mcError } = await supabase
+        .from('activity_completions')
+        .select('activity_id, student_id, is_completed, is_passed, is_failed')
+        .eq('course_id', parseInt(courseId))
+        .gte('time_completed', dateFilter.startDate)
+        .lte('time_completed', dateFilter.endDate)
+        .not('time_completed', 'is', null);
+
+      if (mcError) throw mcError;
+
+      // Calculate monthly statistics
+      const totalCompletions = monthlyCompletions.filter(c => c.is_completed).length;
+      const totalPassed = monthlyCompletions.filter(c => c.is_passed).length;
+      const totalFailed = monthlyCompletions.filter(c => c.is_failed).length;
+      const uniqueStudents = new Set(monthlyCompletions.map(c => c.student_id)).size;
+      const uniqueActivities = new Set(monthlyCompletions.map(c => c.activity_id)).size;
+
+      monthlyStats = {
+        total_completions: totalCompletions,
+        total_passed: totalPassed,
+        total_failed: totalFailed,
+        unique_students: uniqueStudents,
+        unique_activities: uniqueActivities,
+        avg_completions_per_student: uniqueStudents > 0 ? (totalCompletions / uniqueStudents).toFixed(2) : 0
+      };
+
+      // Calculate monthly stats by activity type
+      const completionsByActivity = {};
+      monthlyCompletions.forEach(c => {
+        completionsByActivity[c.activity_id] = (completionsByActivity[c.activity_id] || 0) + 1;
+      });
+
+      monthlyByType = {};
+      activities.forEach(activity => {
+        const completionCount = completionsByActivity[activity.activity_id] || 0;
+        
+        if (!monthlyByType[activity.activity_type]) {
+          monthlyByType[activity.activity_type] = {
+            total_activities: 0,
+            activities_with_completions: 0,
+            total_completions: 0
+          };
+        }
+        
+        monthlyByType[activity.activity_type].total_activities++;
+        if (completionCount > 0) {
+          monthlyByType[activity.activity_type].activities_with_completions++;
+          monthlyByType[activity.activity_type].total_completions += completionCount;
+        }
+      });
+
+      // Calculate monthly stats by section
+      monthlyBySection = {};
+      activities.forEach(activity => {
+        const completionCount = completionsByActivity[activity.activity_id] || 0;
+        const key = activity.section_number;
+        
+        if (!monthlyBySection[key]) {
+          monthlyBySection[key] = {
+            section_number: activity.section_number,
+            section_name: activity.section_name,
+            total_activities: 0,
+            activities_with_completions: 0,
+            total_completions: 0
+          };
+        }
+        
+        monthlyBySection[key].total_activities++;
+        if (completionCount > 0) {
+          monthlyBySection[key].activities_with_completions++;
+          monthlyBySection[key].total_completions += completionCount;
+        }
+      });
+    }
+
+    // Group by activity type (baseline)
     const byType = {};
     activities.forEach(activity => {
       if (!byType[activity.activity_type]) {
@@ -471,7 +791,7 @@ app.get('/api/courses/:courseId/stats', async (req, res) => {
       byType[type].avg_completion_rate = avgRate.toFixed(2);
     });
 
-    // Get completion by section
+    // Get completion by section (baseline)
     const bySection = {};
     activities.forEach(activity => {
       const key = activity.section_number;
@@ -496,14 +816,31 @@ app.get('/api/courses/:courseId/stats', async (req, res) => {
       bySection[key].avg_completion_rate = avgRate.toFixed(2);
     });
 
-    res.json({
+    const response = {
       success: true,
       stats: {
         ...stats,
         by_activity_type: byType,
         by_section: Object.values(bySection).sort((a, b) => a.section_number - b.section_number)
+      },
+      filters: {
+        month: month || null,
+        year: year || null,
+        applied: !!dateFilter
       }
-    });
+    };
+
+    // Add monthly stats if filter is applied
+    if (dateFilter) {
+      response.monthly_stats = {
+        ...monthlyStats,
+        by_activity_type: monthlyByType,
+        by_section: Object.values(monthlyBySection).sort((a, b) => a.section_number - b.section_number),
+        period: `${dateFilter.month}/${dateFilter.year}`
+      };
+    }
+
+    res.json(response);
 
   } catch (error) {
     console.error('Error fetching course stats:', error);
