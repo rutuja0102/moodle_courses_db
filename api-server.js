@@ -3,15 +3,17 @@ const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const axios = require('axios');
+const cron = require('node-cron')
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const API_URL = process.env.API_URL;
 
 // ============================================================================
 // MIDDLEWARE & SUPABASE SETUP (KEEP EXISTING)
 // ============================================================================
 
-// ✅ CORS Configuration
+// CORS Configuration
 app.use(cors({
   origin: [
     'http://localhost:3000',
@@ -1145,14 +1147,14 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
   const { courseId } = req.params;
   
   console.log('\n' + '='.repeat(80));
-  console.log(`🔄 STARTING MOODLE SYNC FOR COURSE ${courseId}`);
+  console.log(` STARTING MOODLE SYNC FOR COURSE ${courseId}`);
   console.log('='.repeat(80));
 
   try {
     // Initialize Moodle client
     const moodle = new MoodleAPIClient(
-      process.env.MOODLE_URL || 'http://omkaravidya.online/webservice/rest/server.php',
-      process.env.MOODLE_TOKEN || '38fff46a850ec4d191e01a2916bad4b3'
+      process.env.MOODLE_URL,
+      process.env.MOODLE_TOKEN
     );
 
     const syncResults = {
@@ -1167,7 +1169,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
     // ========================================================================
     // STEP 1: Fetch and Save Course Information
     // ========================================================================
-    console.log('\n📚 Step 1/5: Fetching course information...');
+    console.log('\n Step 1/5: Fetching course information...');
     
     const courses = await moodle.getCourses();
     const course = courses.find(c => c.id === parseInt(courseId));
@@ -1212,7 +1214,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
     // ========================================================================
     // STEP 2: Fetch and Save Enrolled Students
     // ========================================================================
-    console.log('\n👥 Step 2/5: Fetching enrolled students...');
+    console.log('\n Step 2/5: Fetching enrolled students...');
     
     const enrolledUsers = await moodle.getEnrolledUsers(courseId);
     console.log(`   ✓ Found ${enrolledUsers.length} enrolled users`);
@@ -1258,7 +1260,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
     // ========================================================================
     // STEP 3: Fetch and Save Course Activities
     // ========================================================================
-    console.log('\n📖 Step 3/5: Fetching course content and activities...');
+    console.log('\n Step 3/5: Fetching course content and activities...');
     
     const courseContents = await moodle.getCourseContents(courseId);
     console.log(`   ✓ Found ${courseContents.length} sections`);
@@ -1308,7 +1310,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
     // ========================================================================
     // STEP 4: Fetch and Save Activity Completions
     // ========================================================================
-    console.log('\n✅ Step 4/5: Fetching completion data for all students...');
+    console.log('\n Step 4/5: Fetching completion data for all students...');
     
     const allCompletions = [];
     let processedStudents = 0;
@@ -1353,7 +1355,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
       } catch (error) {
         // Skip "No completion criteria" errors as they're expected for some courses
         if (!error.message.includes('No completion criteria')) {
-          console.log(`\n   ⚠️  Error fetching completions for student ${student.id}: ${error.message}`);
+          console.log(`\n  Error fetching completions for student ${student.id}: ${error.message}`);
         }
       }
     }
@@ -1362,7 +1364,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
 
     // Save completions in batches
     if (allCompletions.length > 0) {
-      console.log('   💾 Saving completions to Supabase...');
+      console.log(' Saving completions to Supabase...');
       
       const batchSize = 100;
       let savedCount = 0;
@@ -1386,16 +1388,16 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
       }
       console.log(`\n   ✓ Saved all completions to Supabase`);
     } else {
-      console.log('   ℹ️  No completion data available (completion tracking may not be enabled for this course)');
+      console.log(' No completion data available (completion tracking may not be enabled for this course)');
     }
 
     // ========================================================================
     // STEP 5: Calculate and Save Course Completions Summary
     // ========================================================================
-    console.log('\n📊 Step 5/5: Calculating course completion statistics...');
+    console.log('\n Step 5/5: Calculating course completion statistics...');
 
     const trackableActivities = allActivities.filter(a => a.has_completion);
-    console.log(`   ℹ️  Found ${trackableActivities.length} trackable activities`);
+    console.log(`Found ${trackableActivities.length} trackable activities`);
     
     if (trackableActivities.length > 0) {
       const courseCompletionsData = [];
@@ -1440,7 +1442,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
         syncResults.courseCompletions.success = students.length;
       }
     } else {
-      console.log('   ℹ️  Skipping course completions (no trackable activities)');
+      console.log('   Skipping course completions (no trackable activities)');
     }
 
     // ========================================================================
@@ -1449,17 +1451,17 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
     console.log('\n' + '='.repeat(80));
-    console.log('✅ SYNC COMPLETED SUCCESSFULLY!');
+    console.log(' SYNC COMPLETED SUCCESSFULLY!');
     console.log('='.repeat(80));
-    console.log(`⏱️  Processing Time: ${processingTime}s`);
-    console.log(`📚 Course: ${syncResults.course.success} saved`);
-    console.log(`📝 Enrollments: ${syncResults.enrollments.success} saved`);
-    console.log(`📖 Activities: ${syncResults.activities.success} saved`);
-    console.log(`✅ Completions: ${syncResults.completions.success} saved`);
-    console.log(`📊 Course Stats: ${syncResults.courseCompletions.success} saved`);
+    console.log(` Processing Time: ${processingTime}s`);
+    console.log(` Course: ${syncResults.course.success} saved`);
+    console.log(` Enrollments: ${syncResults.enrollments.success} saved`);
+    console.log(` Activities: ${syncResults.activities.success} saved`);
+    console.log(` Completions: ${syncResults.completions.success} saved`);
+    console.log(` Course Stats: ${syncResults.courseCompletions.success} saved`);
     
     if (syncResults.errors.length > 0) {
-      console.log(`\n⚠️  Errors encountered:`);
+      console.log(`\n  Errors encountered:`);
       syncResults.errors.forEach(err => console.log(`   - ${err}`));
     }
     console.log('='.repeat(80) + '\n');
@@ -1478,7 +1480,7 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('\n❌ SYNC FAILED:', error.message);
+    console.error('\n SYNC FAILED:', error.message);
     console.error(error.stack);
     
     res.status(500).json({
@@ -1494,12 +1496,12 @@ app.post('/api/moodle/sync/course/:courseId', async (req, res) => {
 // ============================================================================
 
 app.post('/api/moodle/sync/all-courses', async (req, res) => {
-  console.log('\n🔄 Starting sync for ALL courses...');
+  console.log('\n Starting sync for ALL courses...');
 
   try {
     const moodle = new MoodleAPIClient(
-      process.env.MOODLE_URL || 'http://omkaravidya.online/webservice/rest/server.php',
-      process.env.MOODLE_TOKEN || '38fff46a850ec4d191e01a2916bad4b3'
+      process.env.MOODLE_URL,
+      process.env.MOODLE_TOKEN
     );
 
     const courses = await moodle.getCourses();
@@ -1513,13 +1515,14 @@ app.post('/api/moodle/sync/all-courses', async (req, res) => {
 
     for (let i = 0; i < visibleCourses.length; i++) {
       const course = visibleCourses[i];
-      console.log(`\n[${i + 1}/${visibleCourses.length}] 📚 Syncing: ${course.fullname} (ID: ${course.id})`);
+      console.log(`\n[${i + 1}/${visibleCourses.length}] Syncing: ${course.fullname} (ID: ${course.id})`);
       
       try {
         // Call the single course sync internally
-        const response = await axios.post(
-          `http://localhost:${PORT || 3000}/api/moodle/sync/course/${course.id}`
-        );
+        // const response = await axios.post(
+        //   `http://localhost:${PORT || 3000}/api/moodle/sync/course/${course.id}`
+        // );
+        const response = await axios.post(`${API_URL}/course/${course.id}`);
         
         results.push({
           courseId: course.id,
@@ -1541,10 +1544,10 @@ app.post('/api/moodle/sync/all-courses', async (req, res) => {
     }
 
     console.log('\n' + '='.repeat(80));
-    console.log('✅ ALL COURSES SYNC COMPLETED');
+    console.log('ALL COURSES SYNC COMPLETED');
     console.log('='.repeat(80));
-    console.log(`✅ Success: ${successCount}/${visibleCourses.length}`);
-    console.log(`❌ Failed: ${failCount}/${visibleCourses.length}`);
+    console.log(`Success: ${successCount}/${visibleCourses.length}`);
+    console.log(`Failed: ${failCount}/${visibleCourses.length}`);
     console.log('='.repeat(80) + '\n');
 
     res.json({
@@ -1559,7 +1562,7 @@ app.post('/api/moodle/sync/all-courses', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error syncing all courses:', error.message);
+    console.error('Error syncing all courses:', error.message);
     res.status(500).json({
       success: false,
       error: error.message
@@ -1574,18 +1577,18 @@ app.post('/api/moodle/sync/all-courses', async (req, res) => {
 app.get('/api/moodle/test-connection', async (req, res) => {
   try {
     const moodle = new MoodleAPIClient(
-      process.env.MOODLE_URL || 'http://omkaravidya.online/webservice/rest/server.php',
-      process.env.MOODLE_TOKEN || '38fff46a850ec4d191e01a2916bad4b3'
+      process.env.MOODLE_URL,
+      process.env.MOODLE_TOKEN
     );
 
-    console.log('🔍 Testing Moodle connection...');
+    console.log('Testing Moodle connection...');
     const courses = await moodle.getCourses();
-    console.log(`✅ Connection successful! Found ${courses.length} courses`);
+    console.log(`Connection successful! Found ${courses.length} courses`);
 
     res.json({
       success: true,
       message: 'Moodle connection successful',
-      moodleUrl: process.env.MOODLE_URL || 'http://omkaravidya.online/webservice/rest/server.php',
+      moodleUrl: process.env.MOODLE_URL,
       coursesFound: courses.length,
       sampleCourses: courses.slice(0, 5).map(c => ({
         id: c.id,
@@ -1595,7 +1598,7 @@ app.get('/api/moodle/test-connection', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Connection test failed:', error.message);
+    console.error(' Connection test failed:', error.message);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -1656,22 +1659,42 @@ app.get('/api/moodle/sync/status/:courseId', async (req, res) => {
   }
 });
 
+cron.schedule("0 22 * * *", async () => {
+  console.log("\n==================== CRON START ====================");
+  console.log("Running full Moodle sync @", new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"}));
+
+  try {
+    const response = await axios.post(`${API_URL}/all-courses`);
+    console.log("All Courses Synced Successfully!", response.data.summary);
+  } catch (err) {
+    console.error("Sync Failed:", err.message);
+  }
+
+  console.log("==================== CRON END ======================\n");
+},{
+  scheduled: true,
+  timezone: "Asia/Kolkata"
+});
+
+// Log once at startup
+console.log("CRON ACTIVE → Auto sync ALL courses every night @ 10 PM IST");
+
 // ============================================================================
 // START SERVER
 // ============================================================================
 
 app.listen(PORT, () => {
   console.log('='.repeat(80));
-  console.log('🚀 MOODLE COURSE ENROLLMENT & COMPLETION API');
+  console.log('MOODLE COURSE ENROLLMENT & COMPLETION API');
   console.log('='.repeat(80));
-  console.log(`✅ Server: http://localhost:${PORT}`);
-  console.log(`✅ Supabase: ${process.env.SUPABASE_URL}`);
-  console.log('\n📊 KEY FEATURES:');
+  console.log(`Server: http://localhost:${PORT}`);
+  console.log(`Supabase: ${process.env.SUPABASE_URL}`);
+  console.log('\n KEY FEATURES:');
   console.log('  ✓ Per course: How many students enrolled');
   console.log('  ✓ Per course: Which classes/activities completed');
   console.log('  ✓ Student progress tracking');
   console.log('  ✓ Completion statistics');
-  console.log('\n📊 API ENDPOINTS:');
+  console.log('\n API ENDPOINTS:');
   console.log('─'.repeat(80));
   console.log('COURSES:');
   console.log(`  GET  /api/courses                              - All courses with enrollment`);
