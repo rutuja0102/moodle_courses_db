@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(135deg, #ff6b6b 0%, #ffa06d 100%);
+    }
+    .email-wrapper {
+      background: linear-gradient(135deg, #ffe8e8 0%, #ffd8b2 100%);
+      min-height: 100vh;
+      padding: 30px 0;
+    }
+    .container {
+      max-width: 700px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 15px 50px rgba(255, 107, 107, 0.2);
+    }
+    .header {
+      background: linear-gradient(135deg, #ff6b6b 0%, #ff8e53 100%);
+      padding: 40px;
+      text-align: center;
+      color: white;
+      position: relative;
+      overflow: hidden;
+    }
+    .header::before {
+      content: "🚨";
+      position: absolute;
+      font-size: 120px;
+      opacity: 0.1;
+      right: 30px;
+      top: 10px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+    }
+    .urgency-badge {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.2);
+      padding: 8px 20px;
+      border-radius: 30px;
+      font-size: 14px;
+      margin-top: 15px;
+      backdrop-filter: blur(5px);
+    }
+    .content {
+      padding: 45px;
+    }
+    .warning-section {
+      background: linear-gradient(135deg, #fff5f5 0%, #ffe3e3 100%);
+      border: 3px solid #ff6b6b;
+      padding: 30px;
+      border-radius: 15px;
+      margin: 30px 0;
+      text-align: center;
+    }
+    .warning-title {
+      color: #ff6b6b;
+      font-size: 28px;
+      font-weight: 700;
+      margin: 0 0 20px 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 15px;
+    }
+    .course-details {
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      padding: 35px;
+      border-radius: 15px;
+      margin: 40px 0;
+      border: 2px solid #dee2e6;
+    }
+    .details-title {
+      color: #495057;
+      font-size: 24px;
+      margin: 0 0 30px 0;
+      text-align: center;
+    }
+    .details-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 25px;
+      margin-top: 25px;
+    }
+    .detail-card {
+      background: white;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+      border-top: 4px solid #ff6b6b;
+    }
+    .detail-label {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      font-weight: 600;
+    }
+    .detail-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: #333;
+      margin: 10px 0;
+    }
+    .risk-high {
+      color: #ff6b6b;
+      background: #fff5f5;
+      padding: 8px 20px;
+      border-radius: 20px;
+      display: inline-block;
+    }
+    .action-required {
+      background: linear-gradient(135deg, #fff9db 0%, #fff3bf 100%);
+      padding: 35px;
+      border-radius: 15px;
+      margin: 40px 0;
+      border: 2px solid #ffd43b;
+    }
+    .action-title {
+      color: #e67700;
+      font-size: 26px;
+      margin: 0 0 25px 0;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 15px;
+    }
+    .action-list {
+      counter-reset: action-counter;
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .action-list li {
+      counter-increment: action-counter;
+      padding: 25px 30px 25px 90px;
+      margin: 20px 0;
+      background: white;
+      border-radius: 12px;
+      position: relative;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+      border-left: 5px solid #ffa94d;
+    }
+    .action-list li::before {
+      content: counter(action-counter);
+      position: absolute;
+      left: 25px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: linear-gradient(135deg, #ffa94d 0%, #ff922b 100%);
+      color: white;
+      width: 45px;
+      height: 45px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 18px;
+    }
+    .button-group {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      margin: 50px 0;
+      flex-wrap: wrap;
+    }
+    .action-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 18px 35px;
+      background: linear-gradient(135deg, #ff6b6b 0%, #ff8e53 100%);
+      color: white;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 16px;
+      border-radius: 50px;
+      transition: all 0.3s ease;
+      box-shadow: 0 8px 25px rgba(255, 107, 107, 0.3);
+    }
+    .action-button:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 30px rgba(255, 107, 107, 0.4);
+    }
+    .action-button.secondary {
+      background: linear-gradient(135deg, #495057 0%, #343a40 100%);
+      box-shadow: 0 8px 25px rgba(52, 58, 64, 0.3);
+    }
+    .footer {
+      background: linear-gradient(135deg, #212529 0%, #000 100%);
+      padding: 40px;
+      text-align: center;
+      color: #adb5bd;
+    }
+    .system-info {
+      font-size: 14px;
+      line-height: 1.8;
+      margin: 20px 0;
+    }
+    .recipients {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 20px;
+      border-radius: 10px;
+      margin: 25px 0;
+      font-size: 14px;
+    }
+    .recipients strong {
+      color: #ffa94d;
+    }
+    .timestamp {
+      font-size: 12px;
+      color: #868e96;
+      margin-top: 25px;
+      border-top: 1px solid #343a40;
+      padding-top: 20px;
+    }
+    @media (max-width: 768px) {
+      .container {
+        margin: 15px;
+        border-radius: 15px;
+      }
+      .content {
+        padding: 25px;
+      }
+      .header {
+        padding: 30px 20px;
+      }
+      .header h1 {
+        font-size: 28px;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .details-grid {
+        grid-template-columns: 1fr;
+      }
+      .action-list li {
+        padding: 20px 20px 20px 70px;
+      }
+      .action-list li::before {
+        left: 15px;
+        width: 40px;
+        height: 40px;
+      }
+      .button-group {
+        flex-direction: column;
+        align-items: center;
+      }
+      .action-button {
+        width: 100%;
+        justify-content: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>
+          COURSE INACTIVITY ALERT
+        </h1>
+        <div class="urgency-badge">HIGH PRIORITY - IMMEDIATE REVIEW REQUIRED</div>
+      </div>
+      
+      <div class="content">
+        <div class="warning-section">
+          <h2 class="warning-title">
+            ACCESS DENIAL RISK
+          </h2>
+          <p style="font-size: 18px; line-height: 1.7; color: #555; margin: 0;">
+            The following course has shown <strong>NO STUDENT ACTIVITY</strong> for more than 
+            <strong>{{inactiveMonths}} months</strong> and is now at immediate risk of being 
+            <strong>archived or removed</strong> from the system.
+          </p>
+        </div>
+        
+        <div class="course-details">
+          <h3 class="details-title">📋 Course Information</h3>
+          <div class="details-grid">
+            <div class="detail-card">
+              <div class="detail-label">Course Name</div>
+              <div class="detail-value">{{courseName}}</div>
+            </div>
+            <div class="detail-card">
+              <div class="detail-label">Last Recorded Activity</div>
+              <div class="detail-value">{{lastActivityDate}}</div>
+              <div style="color: #ff6b6b; font-weight: 600; margin-top: 10px;">
+                {{daysSinceActivity}} days ago
+              </div>
+            </div>
+            <div class="detail-card">
+              <div class="detail-label">Inactivity Period</div>
+              <div class="detail-value">{{inactiveMonths}}+ months</div>
+            </div>
+            <div class="detail-card">
+              <div class="detail-label">Risk Level</div>
+              <div class="detail-value">
+                <span class="risk-high">CRITICAL</span>
+              </div>
+              <div style="color: #ff6b6b; font-size: 14px; margin-top: 10px;">
+                System archival in {{daysToArchival}} days
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="action-required">
+          <h3 class="action-title">
+            REQUIRED ADMINISTRATIVE ACTIONS
+          </h3>
+          <ul class="action-list">
+            <li>Review course content, assignments, and overall relevance to current curriculum</li>
+            <li>Implement promotional activities or announcements to boost student engagement</li>
+            <li>Consult with department head and teaching staff about course viability</li>
+            <li>Decide on one of three paths: Revitalize, Archive, or Remove from system</li>
+            <li>Update course materials if keeping active, or begin archival documentation</li>
+            <li>Notify stakeholders of final decision within 14 business days</li>
+          </ul>
+        </div>
+        
+        <div class="button-group">
+          <a href="{{adminPanelUrl}}" class="action-button">
+            Review Course in Admin Panel
+          </a>
+          <a href="{{analyticsUrl}}" class="action-button secondary">
+            View Detailed Analytics
+          </a>
+          <a href="{{decisionFormUrl}}" class="action-button secondary">
+            Submit Archival Decision
+          </a>
+        </div>
+      </div>
+      
+      <div class="footer">
+        <div style="font-size: 16px; color: #ffa94d; font-weight: 700; margin-bottom: 20px;">
+          OMKARVIDYA Monitoring System - Admin Alert
+        </div>
+        <div class="system-info">
+          <p>This is an automated high-priority alert from the Moodle Monitoring System.</p>
+          <p>Courses showing no activity for 6+ months will be automatically flagged for archival.</p>
+        </div>
+        <div class="recipients">
+          <strong>Alert Recipients:</strong> {{adminEmails}}
+        </div>
+        <div class="timestamp">
+          Alert generated on: {{currentDate}} | System: v2.1 | Priority: HIGH
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

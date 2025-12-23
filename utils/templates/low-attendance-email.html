@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(135deg, #ff7e5f 0%, #feb47b 100%);
+    }
+    .email-wrapper {
+      background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+      min-height: 100vh;
+      padding: 20px 15px;
+    }
+    .container {
+      max-width: 650px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+    }
+    .header {
+      background: linear-gradient(135deg, #ff7e5f 0%, #feb47b 100%);
+      padding: 30px 20px;
+      text-align: center;
+      color: white;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .alert-icon {
+      font-size: 32px;
+    }
+    .content {
+      padding: 25px;
+    }
+    .greeting {
+      font-size: 18px;
+      margin-bottom: 25px;
+      color: #555;
+      text-align: center;
+    }
+    .highlight-name {
+      color: #ff7e5f;
+      font-weight: 700;
+      font-size: 20px;
+      display: block;
+      margin-top: 5px;
+    }
+    .alert-box {
+      background: linear-gradient(135deg, #fff8f0 0%, #ffefe5 100%);
+      border-left: 5px solid #ff7e5f;
+      padding: 20px;
+      border-radius: 10px;
+      margin: 25px 0;
+      box-shadow: 0 5px 15px rgba(255, 126, 95, 0.1);
+    }
+    .alert-title {
+      color: #ff7e5f;
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0 0 15px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .stats-box {
+      background: linear-gradient(135deg, #f0f9ff 0%, #e6f7ff 100%);
+      border: 2px dashed #4dabf7;
+      padding: 20px;
+      border-radius: 15px;
+      margin: 25px 0;
+    }
+    .stats-title {
+      color: #228be6;
+      font-size: 18px;
+      margin: 0 0 15px 0;
+      text-align: center;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 15px;
+      margin-top: 15px;
+    }
+    .stat-item {
+      background: white;
+      padding: 15px;
+      border-radius: 12px;
+      text-align: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      border: 1px solid #e9ecef;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .stat-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: #333;
+      word-break: break-word;
+    }
+    .completion-rate {
+      color: #ff7e5f;
+    }
+    .threshold {
+      color: #40c057;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 8px 15px;
+      background: linear-gradient(135deg, #ff7e5f 0%, #ff6b6b 100%);
+      color: white;
+      border-radius: 50px;
+      font-weight: 700;
+      font-size: 14px;
+      margin-top: 10px;
+      text-align: center;
+    }
+    .action-section {
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      padding: 25px;
+      border-radius: 15px;
+      margin: 30px 0;
+    }
+    .action-title {
+      color: #495057;
+      font-size: 20px;
+      margin: 0 0 20px 0;
+      text-align: center;
+    }
+    .action-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .action-list li {
+      padding: 15px 15px 15px 70px;
+      margin: 10px 0;
+      background: white;
+      border-radius: 10px;
+      position: relative;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.05);
+      border-left: 4px solid #ff7e5f;
+      min-height: 60px;
+      display: flex;
+      align-items: center;
+    }
+    .action-number {
+      position: absolute;
+      left: 15px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: #ff7e5f;
+      color: white;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .action-text {
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .cta-container {
+      text-align: center;
+      margin: 30px 0;
+    }
+    .cta-button {
+      display: inline-block;
+      padding: 16px 30px;
+      background: linear-gradient(135deg, #ff7e5f 0%, #feb47b 100%);
+      color: white;
+      text-decoration: none;
+      text-align: center;
+      font-weight: 700;
+      font-size: 16px;
+      border-radius: 50px;
+      box-shadow: 0 8px 25px rgba(255, 126, 95, 0.3);
+      transition: all 0.3s ease;
+      border: none;
+      cursor: pointer;
+      min-width: 250px;
+      max-width: 100%;
+      word-break: break-word;
+      white-space: normal;
+    }
+    .cta-button:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 30px rgba(255, 126, 95, 0.4);
+    }
+    .button-icon {
+      margin-right: 8px;
+      font-size: 18px;
+    }
+    .footer {
+      background: linear-gradient(135deg, #343a40 0%, #212529 100%);
+      padding: 30px 20px;
+      text-align: center;
+      color: #adb5bd;
+    }
+    .footer p {
+      margin: 10px 0;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .footer-logo {
+      color: #feb47b;
+      font-weight: 700;
+      font-size: 16px;
+      margin-bottom: 15px;
+    }
+    .timestamp {
+      font-size: 12px;
+      color: #868e96;
+      margin-top: 20px;
+      padding-top: 15px;
+      border-top: 1px solid #495057;
+    }
+    
+    /* Mobile-specific styles */
+    @media (max-width: 768px) {
+      .email-wrapper {
+        padding: 10px;
+      }
+      .container {
+        border-radius: 15px;
+      }
+      .header {
+        padding: 25px 15px;
+      }
+      .header h1 {
+        font-size: 22px;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .alert-icon {
+        font-size: 28px;
+        text-align: center;
+      }
+      .content {
+        padding: 20px 15px;
+      }
+      .stats-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .stat-item {
+        padding: 12px;
+      }
+      .stat-value {
+        font-size: 18px;
+      }
+      .action-list li {
+        padding: 12px 12px 12px 60px;
+        min-height: 50px;
+      }
+      .action-number {
+        width: 35px;
+        height: 35px;
+        font-size: 14px;
+      }
+      .action-text {
+        font-size: 13px;
+      }
+      .cta-button {
+        width: 100%;
+        padding: 14px 20px;
+        font-size: 15px;
+        min-width: unset;
+      }
+      .footer {
+        padding: 25px 15px;
+      }
+    }
+    
+    @media (max-width: 480px) {
+      .header h1 {
+        font-size: 20px;
+      }
+      .alert-title {
+        font-size: 18px;
+        flex-direction: column;
+        gap: 5px;
+        text-align: center;
+      }
+      .stats-title, .action-title {
+        font-size: 16px;
+      }
+      .action-list li {
+        padding: 10px 10px 10px 55px;
+      }
+      .action-number {
+        width: 30px;
+        height: 30px;
+        font-size: 12px;
+        left: 10px;
+      }
+      .cta-button {
+        padding: 12px 16px;
+        font-size: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>
+          <span class="alert-icon"></span>
+          Course Activity Alert
+        </h1>
+      </div>
+      
+      <div class="content">
+        <div class="greeting">
+          Dear 
+          <span class="highlight-name">{{studentName}}</span>
+        </div>
+        
+        <div class="alert-box">
+          <h2 class="alert-title">
+            Low Activity Detected
+          </h2>
+          <p style="font-size: 15px; line-height: 1.6; color: #555; margin: 0;">
+            Your participation in <strong>{{courseName}}</strong> for <strong>{{month}}/{{year}}</strong> 
+            has fallen below the expected threshold.
+          </p>
+        </div>
+        
+        <div class="stats-box">
+          <h3 class="stats-title">Your Activity Summary</h3>
+          <div class="stats-grid">
+            <div class="stat-item">
+              <div class="stat-label">Course</div>
+              <div class="stat-value">{{courseName}}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Period</div>
+              <div class="stat-value">{{month}}/{{year}}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Completion Rate</div>
+              <div class="stat-value completion-rate">{{completionRate}}%</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Required</div>
+              <div class="stat-value threshold">90%</div>
+            </div>
+          </div>
+          <div style="text-align: center; margin-top: 20px;">
+            <span class="status-badge">Below Target - Action Required</span>
+          </div>
+        </div>
+        
+        <div class="action-section">
+          <h3 class="action-title">Recommended Actions</h3>
+          <ul class="action-list">
+            <li>
+              <span class="action-number">1</span>
+              <span class="action-text">Log into Moodle and complete all pending activities</span>
+            </li>
+            <li>
+              <span class="action-number">2</span>
+              <span class="action-text">Review course materials and resources regularly</span>
+            </li>
+            <li>
+              <span class="action-number">3</span>
+              <span class="action-text">Participate actively in forum discussions</span>
+            </li>
+            <li>
+              <span class="action-number">4</span>
+              <span class="action-text">Submit assignments before their deadlines</span>
+            </li>
+            <li>
+              <span class="action-number">5</span>
+              <span class="action-text">Contact your instructor for additional support</span>
+            </li>
+          </ul>
+        </div>
+        
+        <div class="cta-container">
+          <a href="{{moodleUrl}}" class="cta-button">
+            <span class="button-icon"></span>
+            Go to OMKARVIDYA Dashboard
+          </a>
+        </div>
+      </div>
+      
+      <div class="footer">
+        <div class="footer-logo">OMKARVIDYA Alert System</div>
+        <p>This is an automated alert from the Moodle Monitoring System</p>
+        <p>If you believe this is an error, please contact your course instructor immediately</p>
+        <p>For technical support, contact: {{supportEmail}}</p>
+        <div class="timestamp">
+          Alert generated on: {{currentDate}} | System: v2.1
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

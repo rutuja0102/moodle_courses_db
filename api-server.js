@@ -4,6 +4,12 @@ const { createClient } = require("@supabase/supabase-js");
 const cors = require("cors");
 const axios = require("axios");
 const cron = require("node-cron");
+const {
+  sendEmail,
+  generateLowAttendanceEmail,
+  generateInactivityWarningEmail,
+  sendTestEmail
+} = require('./utils/send_email');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1678,7 +1684,7 @@ app.post("/api/moodle/sync/all-courses", async (req, res) => {
         // const response = await axios.post(
         //   `http://localhost:${PORT || 3000}/api/moodle/sync/course/${course.id}`
         // );
-        const response = await axios.post(`${API_URL}/course/${course.id}`);
+        const response = await axios.post(`${API_URL}/api/moodle/sync/course/${course.id}`);
 
         results.push({
           courseId: course.id,
@@ -1815,17 +1821,256 @@ app.get("/api/moodle/sync/status/:courseId", async (req, res) => {
   }
 });
 
+// // ============================================================================
+// // ENDPOINT: CHECK AND SEND LOW ATTENDANCE ALERTS
+// // ============================================================================
+
+// app.post('/api/alerts/check-monthly-attendance', async (req, res) => {
+//   try {
+//     const { month, year, threshold = 90 } = req.body;
+    
+//     if (!month || !year) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Month and year are required',
+//       });
+//     }
+
+//     console.log(`\nChecking attendance for ${month}/${year} (threshold: ${threshold}%)...`);
+
+//     const dateFilter = createMonthFilter(month, year);
+//     const alertsSent = [];
+//     const alertsFailed = [];
+
+//     // Get all courses
+//     const { data: courses, error: coursesError } = await supabase
+//       .from('courses')
+//       .select('course_id, full_name, short_name')
+//       .eq('visible', true);
+
+//     if (coursesError) throw coursesError;
+
+//     for (const course of courses) {
+//       // Get students enrolled in this course
+//       const { data: enrollments, error: enrollError } = await supabase
+//         .from('enrollments')
+//         .select('student_id, student_name, student_email')
+//         .eq('course_id', course.course_id)
+//         .eq('status', 'active');
+
+//       if (enrollError) continue;
+
+//       // Get trackable activities count
+//       const { count: totalActivities } = await supabase
+//         .from('activities')
+//         .select('*', { count: 'exact', head: true })
+//         .eq('course_id', course.course_id)
+//         .eq('has_completion', true);
+
+//       if (!totalActivities || totalActivities === 0) continue;
+
+//       // Check each student's completion rate
+//       for (const student of enrollments) {
+//         // Get student's completions in this month
+//         const { data: completions, error: compError } = await supabase
+//           .from('activity_completions')
+//           .select('activity_id')
+//           .eq('course_id', course.course_id)
+//           .eq('student_id', student.student_id)
+//           .eq('is_completed', true)
+//           .gte('time_completed', dateFilter.startDate)
+//           .lte('time_completed', dateFilter.endDate)
+//           .not('time_completed', 'is', null);
+
+//         if (compError) continue;
+
+//         const completedCount = completions?.length || 0;
+//         const completionRate = ((completedCount / totalActivities) * 100).toFixed(2);
+
+//         // Send alert if below threshold
+//         if (parseFloat(completionRate) < threshold) {
+//           if (student.student_email) {
+//             const emailHtml = generateLowAttendanceEmail(
+//               student.student_name,
+//               course.full_name,
+//               completionRate,
+//               month,
+//               year
+//             );
+
+//             const emailResult = await sendEmail({
+//               to: student.student_email,
+//               subject: `⚠️ Low Course Activity Alert - ${course.short_name}`,
+//               html: emailHtml,
+//             });
+
+//             const alertData = {
+//               student_id: student.student_id,
+//               student_name: student.student_name,
+//               student_email: student.student_email,
+//               course_id: course.course_id,
+//               course_name: course.full_name,
+//               completion_rate: parseFloat(completionRate),
+//               threshold: threshold,
+//               month: month,
+//               year: year,
+//             };
+
+//             if (emailResult.success) {
+//               alertsSent.push(alertData);
+//             } else {
+//               alertsFailed.push({ ...alertData, error: emailResult.error });
+//             }
+//           }
+//         }
+//       }
+//     }
+
+//     console.log(`\n✓ Attendance check complete`);
+//     console.log(`  Alerts sent: ${alertsSent.length}`);
+//     console.log(`  Failed: ${alertsFailed.length}`);
+
+//     res.json({
+//       success: true,
+//       summary: {
+//         total_alerts: alertsSent.length + alertsFailed.length,
+//         sent: alertsSent.length,
+//         failed: alertsFailed.length,
+//         threshold: threshold,
+//         period: `${month}/${year}`,
+//       },
+//       alerts_sent: alertsSent,
+//       alerts_failed: alertsFailed,
+//     });
+
+//   } catch (error) {
+//     console.error('Error checking attendance:', error);
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
+
+// // ============================================================================
+// // ENDPOINT: CHECK AND SEND COURSE INACTIVITY ALERTS
+// // ============================================================================
+
+// app.post('/api/alerts/check-course-inactivity', async (req, res) => {
+//   try {
+//     const { inactiveMonths = 3, adminEmails } = req.body;
+
+//     if (!adminEmails || adminEmails.length === 0) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Admin email addresses are required',
+//       });
+//     }
+
+//     console.log(`\nChecking for courses inactive for ${inactiveMonths}+ months...`);
+
+//     const thresholdDate = new Date();
+//     thresholdDate.setMonth(thresholdDate.getMonth() - inactiveMonths);
+
+//     const alertsSent = [];
+//     const alertsFailed = [];
+
+//     // Get all visible courses
+//     const { data: courses, error: coursesError } = await supabase
+//       .from('courses')
+//       .select('course_id, full_name, short_name, updated_at')
+//       .eq('visible', true);
+
+//     if (coursesError) throw coursesError;
+
+//     for (const course of courses) {
+//       // Get latest activity completion for this course
+//       const { data: latestActivity, error: activityError } = await supabase
+//         .from('activity_completions')
+//         .select('time_completed')
+//         .eq('course_id', course.course_id)
+//         .not('time_completed', 'is', null)
+//         .order('time_completed', { ascending: false })
+//         .limit(1);
+
+//       if (activityError) continue;
+
+//       let isInactive = false;
+//       let lastActivityDate = null;
+
+//       if (!latestActivity || latestActivity.length === 0) {
+//         // No activity completions at all
+//         isInactive = true;
+//       } else {
+//         lastActivityDate = new Date(latestActivity[0].time_completed);
+//         if (lastActivityDate < thresholdDate) {
+//           isInactive = true;
+//         }
+//       }
+
+//       // Send alert if course is inactive
+//       if (isInactive) {
+//         const emailHtml = generateInactivityWarningEmail(
+//           course.full_name,
+//           lastActivityDate ? lastActivityDate.toLocaleDateString() : 'Never',
+//           adminEmails
+//         );
+
+//         // Send to all admin emails
+//         for (const adminEmail of adminEmails) {
+//           const emailResult = await sendEmail({
+//             to: adminEmail,
+//             subject: `🚨 Course Inactivity Alert: ${course.short_name} - Access Denial Risk`,
+//             html: emailHtml,
+//           });
+
+//           const alertData = {
+//             course_id: course.course_id,
+//             course_name: course.full_name,
+//             last_activity_date: lastActivityDate,
+//             inactive_months: inactiveMonths,
+//             admin_email: adminEmail,
+//           };
+
+//           if (emailResult.success) {
+//             alertsSent.push(alertData);
+//           } else {
+//             alertsFailed.push({ ...alertData, error: emailResult.error });
+//           }
+//         }
+//       }
+//     }
+
+//     console.log(`\n✓ Inactivity check complete`);
+//     console.log(`  Alerts sent: ${alertsSent.length}`);
+//     console.log(`  Failed: ${alertsFailed.length}`);
+
+//     res.json({
+//       success: true,
+//       summary: {
+//         total_alerts: alertsSent.length + alertsFailed.length,
+//         sent: alertsSent.length,
+//         failed: alertsFailed.length,
+//         inactive_threshold_months: inactiveMonths,
+//       },
+//       alerts_sent: alertsSent,
+//       alerts_failed: alertsFailed,
+//     });
+
+//   } catch (error) {
+//     console.error('Error checking course inactivity:', error);
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
+
 cron.schedule(
-  "0 22 * * *",
+  "52 11 * * *",
   async () => {
     console.log("\n==================== CRON START ====================");
     console.log(
       "Running full Moodle sync @",
       new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
     );
-
+``
     try {
-      const response = await axios.post(`${API_URL}/all-courses`);
+      const response = await axios.post(`${API_URL}/api/moodle/sync/all-courses`);
       console.log("All Courses Synced Successfully!", response.data.summary);
     } catch (err) {
       console.error("Sync Failed:", err.message);
@@ -1839,62 +2084,132 @@ cron.schedule(
   }
 );
 
-// Log once at startup
-console.log("CRON ACTIVE → Auto sync ALL courses every night @ 10 PM IST");
+// app.post('/api/alerts/test-email', async (req, res) => {
+//   try {
+//     const { to } = req.body;
+
+//     if (!to) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Recipient email (to) is required',
+//       });
+//     }
+
+//     const testHtml = `
+//       <div style="font-family: Arial, sans-serif; padding: 20px;">
+//         <h2>Email Configuration Test</h2>
+//         <p>This is a test email from your Moodle Alert System.</p>
+//         <p>If you received this, your email configuration is working correctly!</p>
+//         <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
+//       </div>
+//     `;
+
+//     const result = await sendEmail({
+//       to: to,
+//       subject: 'Test Email - Moodle Alert System',
+//       html: testHtml,
+//     });
+
+//     res.json(result);
+//   } catch (error) {
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
+
+// // ============================================================================
+// // AUTOMATED CRON JOBS FOR ALERTS
+// // ============================================================================
+
+// // Check monthly attendance every 1st day of the month at 9 AM IST
+// cron.schedule('56 17 * * *', async () => {
+//   console.log('\n==================== ATTENDANCE ALERT CRON ====================');
+//   console.log('Running monthly attendance check @', new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+
+//   try {
+//     const now = new Date();
+//     const lastMonth = now.getMonth() === 0 ? 12 : now.getMonth();
+//     const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+
+//     const response = await axios.post(`${API_URL}/api/alerts/check-monthly-attendance`, {
+//       month: lastMonth,
+//       year: year,
+//       threshold: 90,
+//     });
+
+//     console.log('Attendance alerts sent:', response.data.summary);
+//   } catch (err) {
+//     console.error('Attendance alert failed:', err.message);
+//   }
+
+//   console.log('==================== CRON END ====================\n');
+// }, {
+//   scheduled: true,
+//   timezone: 'Asia/Kolkata',
+// });
+
+// // Check course inactivity every Monday at 10 AM IST
+// cron.schedule('54 16 * * 1', async () => {
+//   console.log('\n==================== INACTIVITY ALERT CRON ====================');
+//   console.log('Running course inactivity check @', new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+
+//   try {
+//     // Get admin emails from environment variable
+//     const adminEmails = process.env.ADMIN_EMAILS ? process.env.ADMIN_EMAILS.split(',') : [];
+
+//     if (adminEmails.length === 0) {
+//       console.log('No admin emails configured. Skipping inactivity check.');
+//       return;
+//     }
+
+//     const response = await axios.post(`${API_URL}/api/alerts/check-course-inactivity`, {
+//       inactiveMonths: 3,
+//       adminEmails: adminEmails,
+//     });
+
+//     console.log('Inactivity alerts sent:', response.data.summary);
+//   } catch (err) {
+//     console.error('Inactivity alert failed:', err.message);
+//   }
+
+//   console.log('==================== CRON END ====================\n');
+// }, {
+//   scheduled: true,
+//   timezone: 'Asia/Kolkata',
+// });
+
+// console.log('✓ Email alert system initialized');
+// console.log('  → Monthly attendance check: 1st of every month @ 9 AM IST');
+// console.log('  → Course inactivity check: Every Monday @ 10 AM IST');
+// // Log once at startup
+// console.log("CRON ACTIVE → Auto sync ALL courses every night @ 10 PM IST");
+
+// app.post('/api/alerts/test-template', async (req, res) => {
+//   try {
+//     const { to } = req.body;
+
+//     if (!to) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Recipient email (to) is required',
+//       });
+//     }
+
+//     const result = await sendTestEmail(to);
+    
+//     res.json({
+//       success: result.success,
+//       message: result.success ? 'Test email sent successfully' : 'Failed to send test email',
+//       details: result
+//     });
+//   } catch (error) {
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
 
 // ============================================================================
 // START SERVER
 // ============================================================================
 
-app.listen(PORT, () => {
-  console.log("=".repeat(80));
-  console.log("MOODLE COURSE ENROLLMENT & COMPLETION API");
-  console.log("=".repeat(80));
-  console.log(`Server: http://localhost:${PORT}`);
-  console.log(`Supabase: ${process.env.SUPABASE_URL}`);
-  console.log("\n KEY FEATURES:");
-  console.log("  ✓ Per course: How many students enrolled");
-  console.log("  ✓ Per course: Which classes/activities completed");
-  console.log("  ✓ Student progress tracking");
-  console.log("  ✓ Completion statistics");
-  console.log("\n API ENDPOINTS:");
-  console.log("─".repeat(80));
-  console.log("COURSES:");
-  console.log(
-    `  GET  /api/courses                              - All courses with enrollment`
-  );
-  console.log(
-    `  GET  /api/courses/:courseId                    - Course details + stats`
-  );
-  console.log(
-    `  GET  /api/courses/:courseId/students           - Students in course`
-  );
-  console.log(
-    `  GET  /api/courses/:courseId/activities         - Activities/classes in course`
-  );
-  console.log(
-    `  GET  /api/courses/:courseId/stats              - Course completion stats`
-  );
-  console.log("\nSTUDENTS:");
-  console.log(
-    `  GET  /api/courses/:courseId/students/:studentId/progress - Student progress`
-  );
-  console.log(
-    `  GET  /api/students/filter                      - Filter students by completion`
-  );
-  console.log("\nFILTERS:");
-  console.log(
-    `  GET  /api/filters/courses                      - Course list for dropdown`
-  );
-  console.log(
-    `  GET  /api/filters/activity-types               - Activity types`
-  );
-  console.log(
-    `  GET  /api/filters/sections                     - Sections in course`
-  );
-  console.log("\nEXPORT:");
-  console.log(`  GET  /api/export/course/:courseId?format=students|activities`);
-  console.log("=".repeat(80));
-});
+app.listen(PORT, () => {});
 
 module.exports = app;
