@@ -43,6 +43,39 @@ app.use((req, res, next) => {
 });
 
 // ============================================================================
+// HELPER FUNCTION: Get Filter Description
+// ============================================================================
+
+function getFilterDescription(month, year, groupId, groupInfo) {
+  const parts = [];
+  
+  if (month && year) {
+    parts.push(`for ${month}/${year}`);
+  }
+  
+  if (groupId && groupInfo) {
+    parts.push(`in group "${groupInfo.group_name}"`);
+  }
+  
+  if (parts.length === 0) {
+    return "Showing all data";
+  }
+  
+  return `Showing data ${parts.join(" ")}`;
+}
+
+// ============================================================================
+// HELPER FUNCTION: Get Filter Type
+// ============================================================================
+
+function getFilterType(hasDateFilter, hasGroupFilter) {
+  if (hasDateFilter && hasGroupFilter) return "monthly_group";
+  if (hasDateFilter) return "monthly";
+  if (hasGroupFilter) return "group";
+  return "none";
+}
+
+// ============================================================================
 // HELPER FUNCTION: Create Date Filter
 // ============================================================================
 
@@ -72,7 +105,7 @@ function createMonthFilter(month, year) {
 }
 
 // ============================================================================
-// ENDPOINT1: GET ALL COURSES + MONTHLY COMPLETION REPORT
+// ENDPOINT1: GET ALL COURSES + MONTHLY COMPLETION REPORT + GROUP FILTER
 // ============================================================================
 app.get("/api/courses", async (req, res) => {
   try {
@@ -82,6 +115,9 @@ app.get("/api/courses", async (req, res) => {
       month,
       year,
       dateField = "created_at",
+      groupId, // Filter by group ID
+      hasGroups, // Filter courses that have groups
+      groupFilterMode = "course" // NEW: 'course' or 'students'
     } = req.query;
 
     // ========== Base Query (Course Summary) ==========
@@ -98,6 +134,113 @@ app.get("/api/courses", async (req, res) => {
 
     let filteredData = summaryData;
     let monthlyStats = null;
+    let groupFilterInfo = null;
+
+    // ========== GROUP FILTER ==========
+    if (groupId) {
+      const groupIdNum = parseInt(groupId);
+      
+      // Get group details
+      const { data: groupDetails, error: groupError } = await supabase
+        .from("groups")
+        .select("*")
+        .eq("group_id", groupIdNum)
+        .single();
+
+      if (groupError) {
+        return res.status(400).json({
+          success: false,
+          error: `Group ${groupId} not found`
+        });
+      }
+
+      groupFilterInfo = {
+        group_id: groupDetails.group_id,
+        group_name: groupDetails.group_name,
+        description: groupDetails.description,
+        course_id: groupDetails.course_id
+      };
+
+      if (groupFilterMode === "course") {
+        // Filter 1: Show only the course that contains this group
+        filteredData = filteredData.filter(c => 
+          c.course_id === groupDetails.course_id
+        );
+      } else if (groupFilterMode === "students") {
+        // Filter 2: Adjust student counts based on group membership
+        // Get students in this group
+        const { data: groupMembers, error: membersError } = await supabase
+          .from("group_members")
+          .select("student_id")
+          .eq("group_id", groupIdNum)
+          .eq("course_id", groupDetails.course_id);
+
+        if (!membersError && groupMembers && groupMembers.length > 0) {
+          const groupStudentIds = groupMembers.map(m => m.student_id);
+          
+          // Get enrollment count for these students
+          const { count: groupEnrollmentCount } = await supabase
+            .from("enrollments")
+            .select("*", { count: "exact", head: true })
+            .eq("course_id", groupDetails.course_id)
+            .in("student_id", groupStudentIds)
+            .eq("status", "active");
+
+          // Get completion stats for these students
+          const { data: groupCompletions } = await supabase
+            .from("activity_completions")
+            .select("student_id, activity_id, is_completed")
+            .eq("course_id", groupDetails.course_id)
+            .in("student_id", groupStudentIds)
+            .eq("is_completed", true);
+
+          // Filter to show only the course with adjusted stats
+          filteredData = filteredData
+            .filter(c => c.course_id === groupDetails.course_id)
+            .map(course => ({
+              ...course,
+              // Override counts with group-specific data
+              total_students: groupEnrollmentCount || 0,
+              active_students: groupEnrollmentCount || 0,
+              _original_counts: {
+                total_students: course.total_students,
+                active_students: course.active_students
+              },
+              _group_filter_applied: true,
+              _group_student_count: groupStudentIds.length
+            }));
+        }
+      }
+    }
+
+    // ========== HAS GROUPS FILTER ==========
+    if (hasGroups === "true" && !groupId) {
+      // Get all courses that have at least one group
+      const { data: coursesWithGroups, error: groupsError } = await supabase
+        .from("groups")
+        .select("course_id")
+        .group("course_id");
+
+      if (!groupsError && coursesWithGroups) {
+        const courseIdsWithGroups = coursesWithGroups.map(g => g.course_id);
+        filteredData = filteredData.filter(c => 
+          courseIdsWithGroups.includes(c.course_id)
+        );
+      }
+    } else if (hasGroups === "false" && !groupId) {
+      // Get all courses that have no groups
+      const { data: coursesWithGroups, error: groupsError } = await supabase
+        .from("groups")
+        .select("course_id")
+        .group("course_id");
+
+      if (!groupsError && coursesWithGroups) {
+        const courseIdsWithGroups = coursesWithGroups.map(g => g.course_id);
+        filteredData = filteredData.filter(c => 
+          !courseIdsWithGroups.includes(c.course_id)
+        );
+      }
+    }
 
     // ========== MONTH + YEAR FILTER ==========
     if (month && year) {
@@ -132,7 +275,7 @@ app.get("/api/courses", async (req, res) => {
         .lte(field, endDate);
 
       const ids = filteredCourses?.map((c) => c.course_id) || [];
-      filteredData = summaryData.filter((c) => ids.includes(c.course_id));
+      filteredData = filteredData.filter((c) => ids.includes(c.course_id));
 
       // ========== COMPLETED ACTIVITIES ==========
       const { data: completedRows } = await supabase
@@ -157,7 +300,7 @@ app.get("/api/courses", async (req, res) => {
           .from("enrollments")
           .select("*")
           .eq("student_id", studentId)
-          .limit(1) // ensures always returns
+          .limit(1)
           .single();
 
         // Dynamically detect correct name column
@@ -183,14 +326,59 @@ app.get("/api/courses", async (req, res) => {
       };
     }
 
+    // ========== GET GROUPS FOR EACH COURSE ==========
+    // Get groups for all filtered courses
+    const courseIds = filteredData.map(c => c.course_id);
+    let courseGroups = {};
+    
+    if (courseIds.length > 0) {
+      const { data: groups, error: groupsError } = await supabase
+        .from("groups")
+        .select("course_id, group_id, group_name, description")
+        .in("course_id", courseIds)
+        .order("group_name");
+
+      if (!groupsError && groups) {
+        // Organize groups by course_id
+        groups.forEach(group => {
+          if (!courseGroups[group.course_id]) {
+            courseGroups[group.course_id] = [];
+          }
+          courseGroups[group.course_id].push({
+            group_id: group.group_id,
+            group_name: group.group_name,
+            description: group.description
+          });
+        });
+      }
+    }
+
+    // Add groups to each course
+    const coursesWithGroups = filteredData.map(course => ({
+      ...course,
+      groups: courseGroups[course.course_id] || [],
+      has_groups: (courseGroups[course.course_id] || []).length > 0,
+      // Add group-specific info if filtered by group
+      ...(groupId && course.course_id === groupFilterInfo?.course_id && {
+        selected_group: groupFilterInfo
+      })
+    }));
+
     // ========== RESPONSE ==========
     return res.json({
       success: true,
-      courses: filteredData,
+      courses: coursesWithGroups,
       monthly: monthlyStats,
+      group_filter: groupFilterInfo ? {
+        ...groupFilterInfo,
+        mode: groupFilterMode
+      } : null,
       filters: {
         month: month || null,
         year: year || null,
+        groupId: groupId || null,
+        hasGroups: hasGroups || null,
+        groupFilterMode: groupFilterMode,
         total_courses: filteredData.length,
       },
     });
@@ -201,13 +389,13 @@ app.get("/api/courses", async (req, res) => {
 });
 
 // ============================================================================
-// ENDPOINT 2: GET COURSE DETAILS WITH COMPLETION STATS
+// ENDPOINT 2: GET COURSE DETAILS WITH COMPLETION STATS (UPDATED WITH GROUP FILTER)
 // ============================================================================
 
 app.get("/api/courses/:courseId", async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { month, year } = req.query;
+    const { month, year, groupId } = req.query;
 
     // Get course basic info
     const { data: courseData, error: courseError } = await supabase
@@ -225,6 +413,46 @@ app.get("/api/courses/:courseId", async (req, res) => {
       });
     }
 
+    // Get student IDs for group filter if groupId is provided
+    let groupStudentIds = null;
+    let groupInfo = null;
+    
+    if (groupId) {
+      // Get group information
+      const { data: groupData, error: groupError } = await supabase
+        .from("groups")
+        .select("*")
+        .eq("course_id", parseInt(courseId))
+        .eq("group_id", parseInt(groupId))
+        .single();
+
+      if (groupError) throw groupError;
+      
+      if (!groupData) {
+        return res.status(404).json({
+          success: false,
+          error: "Group not found in this course",
+        });
+      }
+
+      groupInfo = {
+        group_id: groupData.group_id,
+        group_name: groupData.group_name,
+        description: groupData.description
+      };
+
+      // Get student IDs in this group
+      const { data: groupMembers, error: membersError } = await supabase
+        .from("group_members")
+        .select("student_id")
+        .eq("course_id", parseInt(courseId))
+        .eq("group_id", parseInt(groupId));
+
+      if (membersError) throw membersError;
+
+      groupStudentIds = groupMembers?.map(m => m.student_id) || [];
+    }
+
     // Create date filter if month/year provided
     let dateFilter = null;
     try {
@@ -236,13 +464,18 @@ app.get("/api/courses/:courseId", async (req, res) => {
       });
     }
 
-    // Get enrollment count (always total, not filtered)
-    const { count: enrollmentCount, error: enrollError } = await supabase
+    // Get enrollment count (with optional group filter)
+    let enrollmentQuery = supabase
       .from("enrollments")
       .select("*", { count: "exact", head: true })
       .eq("course_id", parseInt(courseId))
       .eq("status", "active");
 
+    if (groupId && groupStudentIds && groupStudentIds.length > 0) {
+      enrollmentQuery = enrollmentQuery.in("student_id", groupStudentIds);
+    }
+
+    const { count: enrollmentCount, error: enrollError } = await enrollmentQuery;
     if (enrollError) throw enrollError;
 
     // Get activities count (always total)
@@ -262,15 +495,39 @@ app.get("/api/courses/:courseId", async (req, res) => {
 
     if (trackableError) throw trackableError;
 
-    // === FILTERED DATA (if dateFilter exists) ===
+    // === GET GROUPS FOR THIS COURSE ===
+    const { data: groups, error: groupsError } = await supabase
+      .from("groups")
+      .select("group_id, group_name, description")
+      .eq("course_id", parseInt(courseId))
+      .order("group_name");
 
-    // Get activity completions with optional date filter
+    // Get member counts for each group
+    const groupsWithCounts = await Promise.all(
+      (groups || []).map(async (group) => {
+        const { count, error } = await supabase
+          .from("group_members")
+          .select("*", { count: "exact", head: true })
+          .eq("group_id", group.group_id)
+          .eq("course_id", parseInt(courseId));
+
+        return {
+          ...group,
+          member_count: count || 0,
+        };
+      })
+    );
+
+    // === FILTERED DATA (if dateFilter or group filter exists) ===
+
+    // Get activity completions with optional filters
     let completionQuery = supabase
       .from("activity_completions")
       .select("student_id, activity_id, is_completed, time_completed")
       .eq("course_id", parseInt(courseId))
       .eq("is_completed", true);
 
+    // Apply date filter
     if (dateFilter) {
       completionQuery = completionQuery
         .gte("time_completed", dateFilter.startDate)
@@ -278,8 +535,12 @@ app.get("/api/courses/:courseId", async (req, res) => {
         .not("time_completed", "is", null);
     }
 
-    const { data: completionData, error: completionError } =
-      await completionQuery;
+    // Apply group filter
+    if (groupId && groupStudentIds && groupStudentIds.length > 0) {
+      completionQuery = completionQuery.in("student_id", groupStudentIds);
+    }
+
+    const { data: completionData, error: completionError } = await completionQuery;
     if (completionError) throw completionError;
 
     // Calculate unique students and activities that had completions in the period
@@ -293,7 +554,7 @@ app.get("/api/courses/:courseId", async (req, res) => {
 
     const totalCompletionsInPeriod = completionData.length;
 
-    // Get course completion stats with optional date filter
+    // Get course completion stats with optional filters
     let courseCompletionQuery = supabase
       .from("course_completions")
       .select(
@@ -301,6 +562,7 @@ app.get("/api/courses/:courseId", async (req, res) => {
       )
       .eq("course_id", parseInt(courseId));
 
+    // Apply date filter
     if (dateFilter) {
       courseCompletionQuery = courseCompletionQuery
         .gte("completion_date", dateFilter.startDate)
@@ -309,8 +571,12 @@ app.get("/api/courses/:courseId", async (req, res) => {
         .not("completion_date", "is", null);
     }
 
-    const { data: completionStats, error: statsError } =
-      await courseCompletionQuery;
+    // Apply group filter
+    if (groupId && groupStudentIds && groupStudentIds.length > 0) {
+      courseCompletionQuery = courseCompletionQuery.in("student_id", groupStudentIds);
+    }
+
+    const { data: completionStats, error: statsError } = await courseCompletionQuery;
     if (statsError) throw statsError;
 
     // Calculate average completion percentage
@@ -326,32 +592,50 @@ app.get("/api/courses/:courseId", async (req, res) => {
       (s) => s.is_course_completed
     ).length;
 
-    // Build response with clear separation of total vs filtered data
+    // Determine what type of filter is applied
+    const hasDateFilter = !!dateFilter;
+    const hasGroupFilter = !!groupId;
+    const hasAnyFilter = hasDateFilter || hasGroupFilter;
+
+    // Build response
     const response = {
       success: true,
       course: {
         ...courseData,
-        // TOTAL COUNTS (unfiltered)
+        // TOTAL COUNTS (may be filtered by group)
         enrolled_students: enrollmentCount,
         total_activities: activitiesCount,
         trackable_activities: trackableCount,
+        groups: groupsWithCounts,
+        has_groups: (groupsWithCounts || []).length > 0,
       },
       filters: {
         month: month || null,
         year: year || null,
-        applied: !!dateFilter,
+        groupId: groupId || null,
+        applied: hasAnyFilter,
+        description: getFilterDescription(month, year, groupId, groupInfo),
       },
     };
 
-    // Add filtered stats if monthly filter is applied
-    if (dateFilter) {
-      response.monthly_stats = {
+    // If group filter is applied, add group info
+    if (hasGroupFilter && groupInfo) {
+      response.group = {
+        ...groupInfo,
+        student_count: groupStudentIds?.length || 0,
+      };
+    }
+
+    // Add filtered stats if any filter is applied
+    if (hasAnyFilter) {
+      response.filtered_stats = {
         unique_students_active: uniqueStudentsWithCompletions,
         unique_activities_completed: uniqueActivitiesCompleted,
         total_completions: totalCompletionsInPeriod,
         students_who_completed_course: completedStudents,
         avg_completion_percentage: parseFloat(avgCompletion.toFixed(2)),
-        period: `${dateFilter.month}/${dateFilter.year}`,
+        period: dateFilter ? `${dateFilter.month}/${dateFilter.year}` : null,
+        filter_type: getFilterType(hasDateFilter, hasGroupFilter),
       };
     } else {
       // If no filter, show overall completion stats
@@ -359,6 +643,33 @@ app.get("/api/courses/:courseId", async (req, res) => {
         avg_completion_percentage: parseFloat(avgCompletion.toFixed(2)),
         students_completed: completedStudents,
       };
+    }
+
+    // Helper function to get filter description
+    function getFilterDescription(month, year, groupId, groupInfo) {
+      const parts = [];
+      
+      if (month && year) {
+        parts.push(`for ${month}/${year}`);
+      }
+      
+      if (groupId && groupInfo) {
+        parts.push(`in group "${groupInfo.group_name}"`);
+      }
+      
+      if (parts.length === 0) {
+        return "Showing all data";
+      }
+      
+      return `Showing data ${parts.join(" ")}`;
+    }
+
+    // Helper function to get filter type
+    function getFilterType(hasDateFilter, hasGroupFilter) {
+      if (hasDateFilter && hasGroupFilter) return "monthly_group";
+      if (hasDateFilter) return "monthly";
+      if (hasGroupFilter) return "group";
+      return "none";
     }
 
     res.json(response);
@@ -717,13 +1028,13 @@ app.get(
 );
 
 // ============================================================================
-// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE (WITH MONTHLY FILTER)
+// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE (WITH MONTHLY & GROUP FILTER)
 // ============================================================================
 
 app.get("/api/courses/:courseId/stats", async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { month, year } = req.query;
+    const { month, year, groupId } = req.query;
 
     // Create date filter if month/year provided
     let dateFilter = null;
@@ -734,6 +1045,46 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
         success: false,
         error: error.message,
       });
+    }
+
+    // Get student IDs for group filter if groupId is provided
+    let groupStudentIds = null;
+    let groupInfo = null;
+    
+    if (groupId) {
+      // Get group information
+      const { data: groupData, error: groupError } = await supabase
+        .from("groups")
+        .select("*")
+        .eq("course_id", parseInt(courseId))
+        .eq("group_id", parseInt(groupId))
+        .single();
+
+      if (groupError) throw groupError;
+      
+      if (!groupData) {
+        return res.status(404).json({
+          success: false,
+          error: "Group not found in this course",
+        });
+      }
+
+      groupInfo = {
+        group_id: groupData.group_id,
+        group_name: groupData.group_name,
+        description: groupData.description
+      };
+
+      // Get student IDs in this group
+      const { data: groupMembers, error: membersError } = await supabase
+        .from("group_members")
+        .select("student_id")
+        .eq("course_id", parseInt(courseId))
+        .eq("group_id", parseInt(groupId));
+
+      if (membersError) throw membersError;
+
+      groupStudentIds = groupMembers?.map(m => m.student_id) || [];
     }
 
     // Get overall stats from view (unfiltered baseline)
@@ -753,37 +1104,53 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
 
     if (activitiesError) throw activitiesError;
 
-    // If monthly filter is applied, recalculate stats based on completions in that period
-    let monthlyStats = null;
-    let monthlyByType = null;
-    let monthlyBySection = null;
+    // If monthly filter OR group filter is applied, we need to recalculate stats
+    let filteredStats = null;
+    let filteredByType = null;
+    let filteredBySection = null;
+    let recalculatedStats = null;
 
-    if (dateFilter) {
-      // Get completions in the specified month
-      const { data: monthlyCompletions, error: mcError } = await supabase
+    const hasDateFilter = !!dateFilter;
+    const hasGroupFilter = !!groupId;
+    const hasAnyFilter = hasDateFilter || hasGroupFilter;
+
+    if (hasAnyFilter) {
+      // Build query for filtered completions
+      let completionsQuery = supabase
         .from("activity_completions")
-        .select("activity_id, student_id, is_completed, is_passed, is_failed")
-        .eq("course_id", parseInt(courseId))
-        .gte("time_completed", dateFilter.startDate)
-        .lte("time_completed", dateFilter.endDate)
-        .not("time_completed", "is", null);
+        .select("activity_id, student_id, is_completed, is_passed, is_failed, time_completed")
+        .eq("course_id", parseInt(courseId));
 
-      if (mcError) throw mcError;
+      // Apply date filter
+      if (hasDateFilter) {
+        completionsQuery = completionsQuery
+          .gte("time_completed", dateFilter.startDate)
+          .lte("time_completed", dateFilter.endDate)
+          .not("time_completed", "is", null);
+      }
 
-      // Calculate monthly statistics
-      const totalCompletions = monthlyCompletions.filter(
+      // Apply group filter
+      if (hasGroupFilter && groupStudentIds && groupStudentIds.length > 0) {
+        completionsQuery = completionsQuery.in("student_id", groupStudentIds);
+      }
+
+      const { data: filteredCompletions, error: fcError } = await completionsQuery;
+      if (fcError) throw fcError;
+
+      // Calculate filtered statistics
+      const totalCompletions = filteredCompletions?.filter(
         (c) => c.is_completed
-      ).length;
-      const totalPassed = monthlyCompletions.filter((c) => c.is_passed).length;
-      const totalFailed = monthlyCompletions.filter((c) => c.is_failed).length;
+      ).length || 0;
+      const totalPassed = filteredCompletions?.filter((c) => c.is_passed).length || 0;
+      const totalFailed = filteredCompletions?.filter((c) => c.is_failed).length || 0;
       const uniqueStudents = new Set(
-        monthlyCompletions.map((c) => c.student_id)
+        filteredCompletions?.map((c) => c.student_id) || []
       ).size;
       const uniqueActivities = new Set(
-        monthlyCompletions.map((c) => c.activity_id)
+        filteredCompletions?.map((c) => c.activity_id) || []
       ).size;
 
-      monthlyStats = {
+      recalculatedStats = {
         total_completions: totalCompletions,
         total_passed: totalPassed,
         total_failed: totalFailed,
@@ -795,66 +1162,93 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
             : 0,
       };
 
-      // Calculate monthly stats by activity type
+      // Calculate filtered stats by activity type
       const completionsByActivity = {};
-      monthlyCompletions.forEach((c) => {
+      filteredCompletions?.forEach((c) => {
         completionsByActivity[c.activity_id] =
           (completionsByActivity[c.activity_id] || 0) + 1;
       });
 
-      monthlyByType = {};
+      filteredByType = {};
       activities.forEach((activity) => {
         const completionCount =
           completionsByActivity[activity.activity_id] || 0;
 
-        if (!monthlyByType[activity.activity_type]) {
-          monthlyByType[activity.activity_type] = {
+        if (!filteredByType[activity.activity_type]) {
+          filteredByType[activity.activity_type] = {
             total_activities: 0,
             activities_with_completions: 0,
             total_completions: 0,
+            avg_completion_rate: 0,
           };
         }
 
-        monthlyByType[activity.activity_type].total_activities++;
+        filteredByType[activity.activity_type].total_activities++;
         if (completionCount > 0) {
-          monthlyByType[activity.activity_type].activities_with_completions++;
-          monthlyByType[activity.activity_type].total_completions +=
+          filteredByType[activity.activity_type].activities_with_completions++;
+          filteredByType[activity.activity_type].total_completions +=
             completionCount;
         }
       });
 
-      // Calculate monthly stats by section
-      monthlyBySection = {};
+      // Calculate average completion rate per type for filtered data
+      Object.keys(filteredByType).forEach((type) => {
+        const typeActivities = activities.filter(a => a.activity_type === type);
+        const totalStudents = hasGroupFilter ? 
+          (groupStudentIds?.length || 0) : 
+          (stats?.enrolled_students || 0);
+        
+        if (totalStudents > 0) {
+          const avgRate = (filteredByType[type].total_completions / (totalStudents * filteredByType[type].total_activities)) * 100;
+          filteredByType[type].avg_completion_rate = avgRate.toFixed(2);
+        }
+      });
+
+      // Calculate filtered stats by section
+      filteredBySection = {};
       activities.forEach((activity) => {
         const completionCount =
           completionsByActivity[activity.activity_id] || 0;
         const key = activity.section_number;
 
-        if (!monthlyBySection[key]) {
-          monthlyBySection[key] = {
+        if (!filteredBySection[key]) {
+          filteredBySection[key] = {
             section_number: activity.section_number,
             section_name: activity.section_name,
             total_activities: 0,
             activities_with_completions: 0,
             total_completions: 0,
+            avg_completion_rate: 0,
           };
         }
 
-        monthlyBySection[key].total_activities++;
+        filteredBySection[key].total_activities++;
         if (completionCount > 0) {
-          monthlyBySection[key].activities_with_completions++;
-          monthlyBySection[key].total_completions += completionCount;
+          filteredBySection[key].activities_with_completions++;
+          filteredBySection[key].total_completions += completionCount;
+        }
+      });
+
+      // Calculate average completion rate per section for filtered data
+      Object.keys(filteredBySection).forEach((key) => {
+        const totalStudents = hasGroupFilter ? 
+          (groupStudentIds?.length || 0) : 
+          (stats?.enrolled_students || 0);
+        
+        if (totalStudents > 0) {
+          const avgRate = (filteredBySection[key].total_completions / (totalStudents * filteredBySection[key].total_activities)) * 100;
+          filteredBySection[key].avg_completion_rate = avgRate.toFixed(2);
         }
       });
     }
 
-    // Group by activity type (baseline)
+    // Group by activity type (baseline - unfiltered)
     const byType = {};
     activities.forEach((activity) => {
       if (!byType[activity.activity_type]) {
         byType[activity.activity_type] = {
           total: 0,
-          avg_completion_rate: 0,
+          avg_completion_rate: parseFloat(activity.completion_rate || 0).toFixed(2),
           activities: [],
         };
       }
@@ -862,17 +1256,18 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
       byType[activity.activity_type].activities.push(activity);
     });
 
-    // Calculate average completion rate per type
+    // Calculate average completion rate per type (unfiltered)
     Object.keys(byType).forEach((type) => {
-      const avgRate =
-        byType[type].activities.reduce(
-          (sum, a) => sum + parseFloat(a.completion_rate || 0),
-          0
-        ) / byType[type].total;
-      byType[type].avg_completion_rate = avgRate.toFixed(2);
+      const typeActivities = activities.filter(a => a.activity_type === type);
+      const totalCompletionRate = typeActivities.reduce(
+        (sum, a) => sum + parseFloat(a.completion_rate || 0),
+        0
+      );
+      byType[type].avg_completion_rate = 
+        typeActivities.length > 0 ? (totalCompletionRate / typeActivities.length).toFixed(2) : "0.00";
     });
 
-    // Get completion by section (baseline)
+    // Get completion by section (baseline - unfiltered)
     const bySection = {};
     activities.forEach((activity) => {
       const key = activity.section_number;
@@ -881,7 +1276,7 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
           section_number: activity.section_number,
           section_name: activity.section_name,
           total_activities: 0,
-          avg_completion_rate: 0,
+          avg_completion_rate: parseFloat(activity.completion_rate || 0).toFixed(2),
           activities: [],
         };
       }
@@ -889,16 +1284,18 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
       bySection[key].activities.push(activity);
     });
 
-    // Calculate average completion rate per section
+    // Calculate average completion rate per section (unfiltered)
     Object.keys(bySection).forEach((key) => {
-      const avgRate =
-        bySection[key].activities.reduce(
-          (sum, a) => sum + parseFloat(a.completion_rate || 0),
-          0
-        ) / bySection[key].total_activities;
-      bySection[key].avg_completion_rate = avgRate.toFixed(2);
+      const sectionActivities = activities.filter(a => a.section_number === parseInt(key));
+      const totalCompletionRate = sectionActivities.reduce(
+        (sum, a) => sum + parseFloat(a.completion_rate || 0),
+        0
+      );
+      bySection[key].avg_completion_rate = 
+        sectionActivities.length > 0 ? (totalCompletionRate / sectionActivities.length).toFixed(2) : "0.00";
     });
 
+    // Build response
     const response = {
       success: true,
       stats: {
@@ -911,20 +1308,55 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
       filters: {
         month: month || null,
         year: year || null,
-        applied: !!dateFilter,
+        groupId: groupId || null,
+        applied: hasAnyFilter,
+        description: getFilterDescription(month, year, groupId, groupInfo),
       },
     };
 
-    // Add monthly stats if filter is applied
-    if (dateFilter) {
-      response.monthly_stats = {
-        ...monthlyStats,
-        by_activity_type: monthlyByType,
-        by_section: Object.values(monthlyBySection).sort(
+    // Add filtered stats if any filter is applied
+    if (hasAnyFilter) {
+      response.filtered_stats = {
+        ...recalculatedStats,
+        by_activity_type: filteredByType,
+        by_section: Object.values(filteredBySection || {}).sort(
           (a, b) => a.section_number - b.section_number
         ),
-        period: `${dateFilter.month}/${dateFilter.year}`,
+        period: dateFilter ? `${dateFilter.month}/${dateFilter.year}` : null,
+        group: groupInfo ? {
+          group_id: groupInfo.group_id,
+          group_name: groupInfo.group_name,
+          student_count: groupStudentIds?.length || 0
+        } : null,
+        filter_type: getFilterType(hasDateFilter, hasGroupFilter),
       };
+    }
+
+    // Helper function to get filter description
+    function getFilterDescription(month, year, groupId, groupInfo) {
+      const parts = [];
+      
+      if (month && year) {
+        parts.push(`for ${month}/${year}`);
+      }
+      
+      if (groupId && groupInfo) {
+        parts.push(`in group "${groupInfo.group_name}"`);
+      }
+      
+      if (parts.length === 0) {
+        return "Showing all data";
+      }
+      
+      return `Showing data ${parts.join(" ")}`;
+    }
+
+    // Helper function to get filter type
+    function getFilterType(hasDateFilter, hasGroupFilter) {
+      if (hasDateFilter && hasGroupFilter) return "monthly_group";
+      if (hasDateFilter) return "monthly";
+      if (hasGroupFilter) return "group";
+      return "none";
     }
 
     res.json(response);
@@ -1011,7 +1443,7 @@ app.get("/api/filters/courses", async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("courses")
-      .select("course_id, short_name, full_name")
+      .select("course_id, short_name, full_name, visible")
       .eq("visible", true)
       .order("full_name");
 
@@ -1167,6 +1599,143 @@ app.get("/api/export/course/:courseId", async (req, res) => {
 });
 
 // ============================================================================
+// GET COURSE GROUPS WITH DETAILS
+// ============================================================================
+app.get("/api/courses/:courseId/groups-summary", async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    // Get groups with member counts
+    const { data: groups, error: groupsError } = await supabase
+      .from("groups")
+      .select(`
+        *,
+        group_members!left (student_id)
+      `)
+      .eq("course_id", parseInt(courseId))
+      .order("group_name");
+
+    if (groupsError) throw groupsError;
+
+    // Calculate member counts for each group
+    const groupsWithCounts = groups.map(group => {
+      // Count unique student IDs
+      const memberCount = new Set(
+        group.group_members?.map(m => m.student_id) || []
+      ).size;
+
+      return {
+        group_id: group.group_id,
+        group_name: group.group_name,
+        description: group.description,
+        member_count: memberCount,
+        created_at: group.created_at,
+        updated_at: group.updated_at
+      };
+    });
+
+    // Get course details
+    const { data: course, error: courseError } = await supabase
+      .from("courses")
+      .select("course_id, short_name, full_name")
+      .eq("course_id", parseInt(courseId))
+      .single();
+
+    if (courseError) throw courseError;
+
+    res.json({
+      success: true,
+      course: {
+        course_id: course.course_id,
+        name: course.full_name,
+        short_name: course.short_name
+      },
+      groups: groupsWithCounts,
+      total_groups: groupsWithCounts.length,
+      total_members: groupsWithCounts.reduce((sum, g) => sum + g.member_count, 0)
+    });
+  } catch (error) {
+    console.error("Error fetching course groups summary:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// ENDPOINT: GET ALL GROUPS FOR FILTERING (FIXED VERSION)
+// ============================================================================
+app.get("/api/filters/groups", async (req, res) => {
+  try {
+    const { courseId } = req.query;
+
+    // Step 1: Get groups
+    let groupsQuery = supabase
+      .from("groups")
+      .select("group_id, group_name, description, course_id")
+      .order("group_name");
+
+    if (courseId) {
+      groupsQuery = groupsQuery.eq("course_id", parseInt(courseId));
+    }
+
+    const { data: groups, error: groupsError } = await groupsQuery;
+    if (groupsError) throw groupsError;
+
+    if (!groups || groups.length === 0) {
+      return res.json({
+        success: true,
+        groups: [],
+        total: 0
+      });
+    }
+
+    // Step 2: Get course details for these groups
+    const courseIds = [...new Set(groups.map(g => g.course_id))];
+    const { data: courses, error: coursesError } = await supabase
+      .from("courses")
+      .select("course_id, short_name, full_name")
+      .in("course_id", courseIds);
+
+    if (coursesError) throw coursesError;
+
+    // Create a map of course_id -> course details
+    const courseMap = {};
+    if (courses) {
+      courses.forEach(course => {
+        courseMap[course.course_id] = {
+          short_name: course.short_name,
+          full_name: course.full_name
+        };
+      });
+    }
+
+    // Step 3: Format the response
+    const formattedGroups = groups.map(group => {
+      const courseInfo = courseMap[group.course_id] || {};
+      
+      return {
+        value: group.group_id,
+        label: `${group.group_name} (${courseInfo.short_name || courseInfo.full_name || `Course ${group.course_id}`})`,
+        group_id: group.group_id,
+        group_name: group.group_name,
+        description: group.description || "",
+        course_id: group.course_id,
+        course_name: courseInfo.full_name || courseInfo.short_name || `Course ${group.course_id}`,
+        course_short_name: courseInfo.short_name || ""
+      };
+    });
+
+    res.json({ 
+      success: true, 
+      groups: formattedGroups,
+      total: formattedGroups.length 
+    });
+  } catch (error) {
+    console.error("Error fetching groups for filters:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
 // HEALTH CHECK
 // ============================================================================
 
@@ -1256,6 +1825,27 @@ class MoodleAPIClient {
       }
     );
   }
+
+  /**
+   * Get all groups in a course
+   */
+  async getCourseGroups(courseId) {
+    return await this.callFunction("core_group_get_course_groups", {
+      courseid: courseId,
+    });
+  }
+
+  /**
+   * Get members of a specific group
+   */
+  async getGroupMembers(groupId) {
+    console.log(
+      `   ⚠ getGroupMembers: Function not available, returning empty array`
+    );
+    return await this.callFunction("core_group_get_group_members", {
+      groupid: groupId,
+    });
+  }
 }
 
 // ============================================================================
@@ -1271,7 +1861,6 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
   console.log("=".repeat(80));
 
   try {
-    // Initialize Moodle client
     const moodle = new MoodleAPIClient(
       process.env.MOODLE_URL,
       process.env.MOODLE_TOKEN
@@ -1283,13 +1872,15 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
       activities: { success: 0, failed: 0 },
       completions: { success: 0, failed: 0 },
       courseCompletions: { success: 0, failed: 0 },
+      groups: { success: 0, failed: 0 },
+      groupMembers: { success: 0, failed: 0 },
       errors: [],
     };
 
     // ========================================================================
     // STEP 1: Fetch and Save Course Information
     // ========================================================================
-    console.log("\n Step 1/5: Fetching course information...");
+    console.log("\n📚 Step 1/6: Fetching course information...");
 
     const courses = await moodle.getCourses();
     const course = courses.find((c) => c.id === parseInt(courseId));
@@ -1303,13 +1894,12 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
 
     console.log(`   ✓ Found: ${course.fullname}`);
 
-    // Save course to Supabase - FIXED COLUMN NAMES
     const courseData = {
       course_id: course.id,
       short_name: course.shortname,
       full_name: course.fullname,
       category_id: course.categoryid || 0,
-      category_name: null, // You may need to fetch this separately
+      category_name: null,
       summary: course.summary || "",
       format: course.format || "topics",
       start_date: course.startdate ? new Date(course.startdate * 1000) : null,
@@ -1334,12 +1924,11 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
     // ========================================================================
     // STEP 2: Fetch and Save Enrolled Students
     // ========================================================================
-    console.log("\n Step 2/5: Fetching enrolled students...");
+    console.log("\n👥 Step 2/6: Fetching enrolled students...");
 
     const enrolledUsers = await moodle.getEnrolledUsers(courseId);
     console.log(`   ✓ Found ${enrolledUsers.length} enrolled users`);
 
-    // Filter only students (exclude teachers, admins, etc.)
     const students = enrolledUsers.filter(
       (user) =>
         user.roles &&
@@ -1350,7 +1939,6 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
 
     console.log(`   ✓ Filtered to ${students.length} students`);
 
-    // Save enrollments to Supabase - FIXED COLUMN NAMES
     if (students.length > 0) {
       const enrollmentsData = students.map((student) => ({
         course_id: parseInt(courseId),
@@ -1384,7 +1972,7 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
     // ========================================================================
     // STEP 3: Fetch and Save Course Activities
     // ========================================================================
-    console.log("\n Step 3/5: Fetching course content and activities...");
+    console.log("\n📝 Step 3/6: Fetching course content and activities...");
 
     const courseContents = await moodle.getCourseContents(courseId);
     console.log(`   ✓ Found ${courseContents.length} sections`);
@@ -1401,7 +1989,7 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
             section_name: section.name,
             activity_name: module.name,
             activity_type: module.modname,
-            activity_url: module.url || null, // FIXED: activity_url instead of url
+            activity_url: module.url || null,
             description: module.description || "",
             visible: module.visible === 1,
             availability_start: null,
@@ -1436,9 +2024,55 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
     }
 
     // ========================================================================
-    // STEP 4: Fetch and Save Activity Completions
+    // STEP 4: Fetch and Save Groups
     // ========================================================================
-    console.log("\n Step 4/5: Fetching completion data for all students...");
+    console.log("\n👥 Step 4/6: Fetching groups...");
+
+    try {
+      const courseGroups = await moodle.getCourseGroups(courseId);
+      console.log(`   ✓ Found ${courseGroups.length} groups`);
+
+      if (courseGroups.length > 0) {
+        // Save groups
+        const groupsData = courseGroups.map((group) => ({
+          group_id: group.id,
+          course_id: parseInt(courseId),
+          group_name: group.name,
+          description: group.description || "",
+          updated_at: new Date(),
+        }));
+
+        const { error: groupsError } = await supabase
+          .from("groups")
+          .upsert(groupsData, { onConflict: "course_id,group_id" });
+
+        if (groupsError) {
+          console.error("   ✗ Error saving groups:", groupsError.message);
+          syncResults.groups.failed = courseGroups.length;
+          syncResults.errors.push(`Groups: ${groupsError.message}`);
+        } else {
+          console.log(`   ✓ Saved ${courseGroups.length} groups to Supabase`);
+          syncResults.groups.success = courseGroups.length;
+        }
+
+        // Note: Group members sync is skipped as it requires additional permissions
+        // and the Moodle API function might not be available in all setups
+        console.log(
+          `   ℹ Group members sync skipped - requires additional permissions`
+        );
+      } else {
+        console.log("   ℹ No groups found in this course");
+      }
+    } catch (error) {
+      console.log(`   ⚠ Warning fetching groups: ${error.message}`);
+      // Don't fail the entire sync if groups fail
+      syncResults.errors.push(`Groups warning: ${error.message}`);
+    }
+
+    // ========================================================================
+    // STEP 5: Fetch and Save Activity Completions
+    // ========================================================================
+    console.log("\n✅ Step 5/6: Fetching completion data for all students...");
 
     const allCompletions = [];
     let processedStudents = 0;
@@ -1451,13 +2085,11 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
       );
 
       try {
-        // Get activities completion status
         const activitiesCompletion = await moodle.getActivitiesCompletionStatus(
           courseId,
           student.id
         );
 
-        // Process each activity completion
         if (
           activitiesCompletion.statuses &&
           activitiesCompletion.statuses.length > 0
@@ -1465,7 +2097,6 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
           studentsWithCompletions++;
 
           activitiesCompletion.statuses.forEach((status) => {
-            // Find the activity name from our activities list
             const activity = allActivities.find(
               (a) => a.activity_id === status.cmid
             );
@@ -1489,13 +2120,14 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
           });
         }
 
-        // Small delay to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 100)); // Rate limiting
       } catch (error) {
-        // Skip "No completion criteria" errors as they're expected for some courses
         if (!error.message.includes("No completion criteria")) {
           console.log(
-            `\n  Error fetching completions for student ${student.id}: ${error.message}`
+            `\n   ⚠ Error fetching completions for student ${student.id}: ${error.message}`
+          );
+          syncResults.errors.push(
+            `Student ${student.id} completions: ${error.message}`
           );
         }
       }
@@ -1505,9 +2137,8 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
       `\n   ✓ Fetched ${allCompletions.length} completion records from ${studentsWithCompletions}/${students.length} students`
     );
 
-    // Save completions in batches
     if (allCompletions.length > 0) {
-      console.log(" Saving completions to Supabase...");
+      console.log("   💾 Saving completions to Supabase...");
 
       const batchSize = 100;
       let savedCount = 0;
@@ -1535,18 +2166,16 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
       }
       console.log(`\n   ✓ Saved all completions to Supabase`);
     } else {
-      console.log(
-        " No completion data available (completion tracking may not be enabled for this course)"
-      );
+      console.log("   ℹ No completion data available");
     }
 
     // ========================================================================
-    // STEP 5: Calculate and Save Course Completions Summary
+    // STEP 6: Calculate and Save Course Completions Summary
     // ========================================================================
-    console.log("\n Step 5/5: Calculating course completion statistics...");
+    console.log("\n📊 Step 6/6: Calculating course completion statistics...");
 
     const trackableActivities = allActivities.filter((a) => a.has_completion);
-    console.log(`Found ${trackableActivities.length} trackable activities`);
+    console.log(`   Found ${trackableActivities.length} trackable activities`);
 
     if (trackableActivities.length > 0) {
       const courseCompletionsData = [];
@@ -1593,7 +2222,7 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
         syncResults.courseCompletions.success = students.length;
       }
     } else {
-      console.log("   Skipping course completions (no trackable activities)");
+      console.log("   ℹ Skipping course completions (no trackable activities)");
     }
 
     // ========================================================================
@@ -1602,19 +2231,20 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
     console.log("\n" + "=".repeat(80));
-    console.log(" SYNC COMPLETED SUCCESSFULLY!");
+    console.log("✅ SYNC COMPLETED SUCCESSFULLY!");
     console.log("=".repeat(80));
     console.log(` Processing Time: ${processingTime}s`);
     console.log(` Course: ${syncResults.course.success} saved`);
     console.log(` Enrollments: ${syncResults.enrollments.success} saved`);
     console.log(` Activities: ${syncResults.activities.success} saved`);
+    console.log(` Groups: ${syncResults.groups.success} saved`);
     console.log(` Completions: ${syncResults.completions.success} saved`);
     console.log(
       ` Course Stats: ${syncResults.courseCompletions.success} saved`
     );
 
     if (syncResults.errors.length > 0) {
-      console.log(`\n  Errors encountered:`);
+      console.log(`\n⚠ Errors encountered:`);
       syncResults.errors.forEach((err) => console.log(`   - ${err}`));
     }
     console.log("=".repeat(80) + "\n");
@@ -1632,7 +2262,7 @@ app.post("/api/moodle/sync/course/:courseId", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("\n SYNC FAILED:", error.message);
+    console.error("\n❌ SYNC FAILED:", error.message);
     console.error(error.stack);
 
     res.status(500).json({
@@ -1678,7 +2308,9 @@ app.post("/api/moodle/sync/all-courses", async (req, res) => {
         // const response = await axios.post(
         //   `http://localhost:${PORT || 3000}/api/moodle/sync/course/${course.id}`
         // );
-        const response = await axios.post(`${API_URL}/course/${course.id}`);
+        const response = await axios.post(
+          `${API_URL}/api/moodle/sync/course/${course.id}`
+        );
 
         results.push({
           courseId: course.id,
@@ -1819,13 +2451,17 @@ cron.schedule(
   "0 22 * * *",
   async () => {
     console.log("\n==================== CRON START ====================");
+    console.log("System TZ:", Intl.DateTimeFormat().resolvedOptions().timeZone);
+    console.log("Now:", new Date().toISOString());
     console.log(
       "Running full Moodle sync @",
       new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
     );
 
     try {
-      const response = await axios.post(`${API_URL}/all-courses`);
+      const response = await axios.post(
+        `${API_URL}/api/moodle/sync/all-courses`
+      );
       console.log("All Courses Synced Successfully!", response.data.summary);
     } catch (err) {
       console.error("Sync Failed:", err.message);
