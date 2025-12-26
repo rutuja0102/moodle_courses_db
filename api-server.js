@@ -389,7 +389,7 @@ app.get("/api/courses", async (req, res) => {
 });
 
 // ============================================================================
-// ENDPOINT 2: GET COURSE DETAILS WITH COMPLETION STATS (UPDATED WITH GROUP FILTER)
+// ENDPOINT 2: GET COURSE DETAILS WITH COMPLETION STATS
 // ============================================================================
 
 app.get("/api/courses/:courseId", async (req, res) => {
@@ -416,6 +416,7 @@ app.get("/api/courses/:courseId", async (req, res) => {
     // Get student IDs for group filter if groupId is provided
     let groupStudentIds = null;
     let groupInfo = null;
+    let groupMembersCount = 0;
     
     if (groupId) {
       // Get group information
@@ -441,16 +442,31 @@ app.get("/api/courses/:courseId", async (req, res) => {
         description: groupData.description
       };
 
-      // Get student IDs in this group
-      const { data: groupMembers, error: membersError } = await supabase
-        .from("group_members")
-        .select("student_id")
-        .eq("course_id", parseInt(courseId))
-        .eq("group_id", parseInt(groupId));
+      // Try to get student IDs in this group (handle if table doesn't exist)
+      try {
+        const { data: groupMembers, error: membersError } = await supabase
+          .from("group_members")
+          .select("student_id")
+          .eq("course_id", parseInt(courseId))
+          .eq("group_id", parseInt(groupId));
 
-      if (membersError) throw membersError;
-
-      groupStudentIds = groupMembers?.map(m => m.student_id) || [];
+        if (!membersError && groupMembers) {
+          groupStudentIds = groupMembers.map(m => m.student_id);
+          groupMembersCount = groupMembers.length;
+        } else if (membersError && membersError.code === 'PGRST204') {
+          // Table doesn't exist - that's OK, we'll handle it
+          console.log(`Group members table doesn't exist for group ${groupId}`);
+          groupStudentIds = [];
+          groupMembersCount = 0;
+        } else if (membersError) {
+          throw membersError;
+        }
+      } catch (tableError) {
+        // Table might not exist - that's OK for now
+        console.log(`Note: group_members table not accessible: ${tableError.message}`);
+        groupStudentIds = [];
+        groupMembersCount = 0;
+      }
     }
 
     // Create date filter if month/year provided
@@ -502,21 +518,43 @@ app.get("/api/courses/:courseId", async (req, res) => {
       .eq("course_id", parseInt(courseId))
       .order("group_name");
 
-    // Get member counts for each group
-    const groupsWithCounts = await Promise.all(
-      (groups || []).map(async (group) => {
-        const { count, error } = await supabase
-          .from("group_members")
-          .select("*", { count: "exact", head: true })
-          .eq("group_id", group.group_id)
-          .eq("course_id", parseInt(courseId));
+    let groupsWithCounts = [];
 
-        return {
+    if (!groupsError && groups && groups.length > 0) {
+      // Try to get member counts for each group (handle if table doesn't exist)
+      try {
+        groupsWithCounts = await Promise.all(
+          groups.map(async (group) => {
+            try {
+              const { count, error } = await supabase
+                .from("group_members")
+                .select("*", { count: "exact", head: true })
+                .eq("group_id", group.group_id)
+                .eq("course_id", parseInt(courseId));
+
+              return {
+                ...group,
+                member_count: count || 0,
+              };
+            } catch (countError) {
+              // If table doesn't exist, return 0 count
+              return {
+                ...group,
+                member_count: 0,
+                _note: "Member count unavailable"
+              };
+            }
+          })
+        );
+      } catch (tableError) {
+        // Table doesn't exist, just return groups without counts
+        groupsWithCounts = groups.map(group => ({
           ...group,
-          member_count: count || 0,
-        };
-      })
-    );
+          member_count: 0,
+          _note: "Member count unavailable (table doesn't exist)"
+        }));
+      }
+    }
 
     // === FILTERED DATA (if dateFilter or group filter exists) ===
 
@@ -535,7 +573,7 @@ app.get("/api/courses/:courseId", async (req, res) => {
         .not("time_completed", "is", null);
     }
 
-    // Apply group filter
+    // Apply group filter (only if we have student IDs)
     if (groupId && groupStudentIds && groupStudentIds.length > 0) {
       completionQuery = completionQuery.in("student_id", groupStudentIds);
     }
@@ -571,7 +609,7 @@ app.get("/api/courses/:courseId", async (req, res) => {
         .not("completion_date", "is", null);
     }
 
-    // Apply group filter
+    // Apply group filter (only if we have student IDs)
     if (groupId && groupStudentIds && groupStudentIds.length > 0) {
       courseCompletionQuery = courseCompletionQuery.in("student_id", groupStudentIds);
     }
@@ -622,7 +660,8 @@ app.get("/api/courses/:courseId", async (req, res) => {
     if (hasGroupFilter && groupInfo) {
       response.group = {
         ...groupInfo,
-        student_count: groupStudentIds?.length || 0,
+        student_count: groupMembersCount,
+        members_available: groupStudentIds && groupStudentIds.length > 0,
       };
     }
 
@@ -1028,7 +1067,7 @@ app.get(
 );
 
 // ============================================================================
-// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE (WITH MONTHLY & GROUP FILTER)
+// ENDPOINT 6: GET COMPLETION STATISTICS FOR A COURSE
 // ============================================================================
 
 app.get("/api/courses/:courseId/stats", async (req, res) => {
@@ -1050,6 +1089,7 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
     // Get student IDs for group filter if groupId is provided
     let groupStudentIds = null;
     let groupInfo = null;
+    let groupMembersAvailable = false;
     
     if (groupId) {
       // Get group information
@@ -1075,16 +1115,34 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
         description: groupData.description
       };
 
-      // Get student IDs in this group
-      const { data: groupMembers, error: membersError } = await supabase
-        .from("group_members")
-        .select("student_id")
-        .eq("course_id", parseInt(courseId))
-        .eq("group_id", parseInt(groupId));
+      // Try to get student IDs in this group (handle if table doesn't exist)
+      try {
+        const { data: groupMembers, error: membersError } = await supabase
+          .from("group_members")
+          .select("student_id")
+          .eq("course_id", parseInt(courseId))
+          .eq("group_id", parseInt(groupId));
 
-      if (membersError) throw membersError;
-
-      groupStudentIds = groupMembers?.map(m => m.student_id) || [];
+        if (!membersError && groupMembers) {
+          groupStudentIds = groupMembers.map(m => m.student_id);
+          groupMembersAvailable = true;
+        } else if (membersError && membersError.code === 'PGRST205') {
+          // Table doesn't exist - that's OK
+          console.log(`Note: group_members table doesn't exist`);
+          groupStudentIds = [];
+          groupMembersAvailable = false;
+        } else if (membersError) {
+          // Other error
+          console.log(`Error accessing group_members: ${membersError.message}`);
+          groupStudentIds = [];
+          groupMembersAvailable = false;
+        }
+      } catch (tableError) {
+        // Table might not exist - that's OK for now
+        console.log(`Note: group_members table not accessible: ${tableError.message}`);
+        groupStudentIds = [];
+        groupMembersAvailable = false;
+      }
     }
 
     // Get overall stats from view (unfiltered baseline)
@@ -1112,7 +1170,7 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
 
     const hasDateFilter = !!dateFilter;
     const hasGroupFilter = !!groupId;
-    const hasAnyFilter = hasDateFilter || hasGroupFilter;
+    const hasAnyFilter = hasDateFilter || (hasGroupFilter && groupMembersAvailable);
 
     if (hasAnyFilter) {
       // Build query for filtered completions
@@ -1129,8 +1187,8 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
           .not("time_completed", "is", null);
       }
 
-      // Apply group filter
-      if (hasGroupFilter && groupStudentIds && groupStudentIds.length > 0) {
+      // Apply group filter (only if we have student IDs)
+      if (hasGroupFilter && groupMembersAvailable && groupStudentIds && groupStudentIds.length > 0) {
         completionsQuery = completionsQuery.in("student_id", groupStudentIds);
       }
 
@@ -1194,7 +1252,7 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
       // Calculate average completion rate per type for filtered data
       Object.keys(filteredByType).forEach((type) => {
         const typeActivities = activities.filter(a => a.activity_type === type);
-        const totalStudents = hasGroupFilter ? 
+        const totalStudents = hasGroupFilter && groupMembersAvailable ? 
           (groupStudentIds?.length || 0) : 
           (stats?.enrolled_students || 0);
         
@@ -1231,7 +1289,7 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
 
       // Calculate average completion rate per section for filtered data
       Object.keys(filteredBySection).forEach((key) => {
-        const totalStudents = hasGroupFilter ? 
+        const totalStudents = hasGroupFilter && groupMembersAvailable ? 
           (groupStudentIds?.length || 0) : 
           (stats?.enrolled_students || 0);
         
@@ -1310,9 +1368,14 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
         year: year || null,
         groupId: groupId || null,
         applied: hasAnyFilter,
-        description: getFilterDescription(month, year, groupId, groupInfo),
+        description: getFilterDescription(month, year, groupId, groupInfo, groupMembersAvailable),
       },
     };
+
+    // Add note if group filter was requested but members data is not available
+    if (hasGroupFilter && !groupMembersAvailable) {
+      response.group_filter_note = "Group members data not available (group_members table doesn't exist). Showing full course statistics.";
+    }
 
     // Add filtered stats if any filter is applied
     if (hasAnyFilter) {
@@ -1323,17 +1386,21 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
           (a, b) => a.section_number - b.section_number
         ),
         period: dateFilter ? `${dateFilter.month}/${dateFilter.year}` : null,
-        group: groupInfo ? {
+        group: groupInfo && groupMembersAvailable ? {
           group_id: groupInfo.group_id,
           group_name: groupInfo.group_name,
           student_count: groupStudentIds?.length || 0
-        } : null,
-        filter_type: getFilterType(hasDateFilter, hasGroupFilter),
+        } : (groupInfo ? {
+          group_id: groupInfo.group_id,
+          group_name: groupInfo.group_name,
+          note: "Member data unavailable"
+        } : null),
+        filter_type: getFilterType(hasDateFilter, hasGroupFilter && groupMembersAvailable),
       };
     }
 
     // Helper function to get filter description
-    function getFilterDescription(month, year, groupId, groupInfo) {
+    function getFilterDescription(month, year, groupId, groupInfo, membersAvailable) {
       const parts = [];
       
       if (month && year) {
@@ -1341,7 +1408,11 @@ app.get("/api/courses/:courseId/stats", async (req, res) => {
       }
       
       if (groupId && groupInfo) {
-        parts.push(`in group "${groupInfo.group_name}"`);
+        if (membersAvailable) {
+          parts.push(`in group "${groupInfo.group_name}"`);
+        } else {
+          parts.push(`(group "${groupInfo.group_name}" - member data not available)`);
+        }
       }
       
       if (parts.length === 0) {
